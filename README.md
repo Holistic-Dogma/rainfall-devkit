@@ -1,19 +1,20 @@
 # Rainfall SDK
 
 Official SDK for the Rainfall API - 200+ tools for building AI-powered applications.
+Utilities to leverage the backend tools we use for our own applications like [Harmonic](https://harmonic.iswork.in) to bootstrap your own projects.
 
 [![npm version](https://badge.fury.io/js/@rainfall%2Fsdk.svg)](https://www.npmjs.com/package/@rainfall/sdk)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 ## Features
 
-- 🚀 **200+ Tools** - GitHub, Notion, Linear, Slack, Figma, Stripe, and more
-- 🧠 **Semantic Memory** - Store and recall information with vector search
-- 🔍 **Web Search** - Exa and Perplexity integration
-- 🤖 **AI Tools** - Embeddings, image generation, OCR, vision, chat
-- 📊 **Data Processing** - CSV, scripts, similarity search
-- 🛠️ **Developer Friendly** - TypeScript, retry logic, error handling
-- 🔌 **MCP Support** - Use with Claude, Cursor, and other AI assistants
+- **200+ Tools** - GitHub, Notion, Linear, Slack, Figma, Stripe, and more
+- **Semantic Memory** - Store and recall information with vector search
+- **Web Search** - Exa and Perplexity integration
+- **AI Tools** - Embeddings, image generation, OCR, vision, chat
+- **Data Processing** - CSV, scripts, similarity search
+- **Developer Friendly** - TypeScript, retry logic, error handling
+- **MCP Support** - Use with Claude, Cursor, and other AI assistants
 
 ## Installation
 
