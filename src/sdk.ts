@@ -1,0 +1,266 @@
+/**
+ * Main Rainfall SDK class with namespace-based DSL
+ */
+
+import { RainfallClient } from './client.js';
+import { RainfallConfig } from './types.js';
+import { createIntegrations, IntegrationsNamespace } from './namespaces/integrations.js';
+import { createMemory } from './namespaces/memory.js';
+import { createArticles } from './namespaces/articles.js';
+import { createWeb } from './namespaces/web.js';
+import { createAI } from './namespaces/ai.js';
+import { createData } from './namespaces/data.js';
+import { createUtils } from './namespaces/utils.js';
+import type { Memory, Articles, Web, AI, Data, Utils } from './types.js';
+
+export class Rainfall {
+  private readonly client: RainfallClient;
+  private _integrations?: IntegrationsNamespace;
+  private _memory?: Memory.MemoryClient;
+  private _articles?: Articles.ArticlesClient;
+  private _web?: Web.WebClient;
+  private _ai?: AI.AIClient;
+  private _data?: Data.DataClient;
+  private _utils?: Utils.UtilsClient;
+
+  constructor(config: RainfallConfig) {
+    this.client = new RainfallClient(config);
+  }
+
+  /**
+   * Integrations namespace - GitHub, Notion, Linear, Slack, Figma, Stripe
+   * 
+   * @example
+   * ```typescript
+   * // GitHub
+   * await rainfall.integrations.github.issues.create({
+   *   owner: 'facebook',
+   *   repo: 'react',
+   *   title: 'Bug report'
+   * });
+   * 
+   * // Slack
+   * await rainfall.integrations.slack.messages.send({
+   *   channelId: 'C123456',
+   *   text: 'Hello team!'
+   * });
+   * 
+   * // Linear
+   * const issues = await rainfall.integrations.linear.issues.list();
+   * ```
+   */
+  get integrations(): IntegrationsNamespace {
+    if (!this._integrations) {
+      this._integrations = createIntegrations(this.client);
+    }
+    return this._integrations;
+  }
+
+  /**
+   * Memory namespace - Semantic memory storage and retrieval
+   * 
+   * @example
+   * ```typescript
+   * // Store a memory
+   * await rainfall.memory.create({
+   *   content: 'User prefers dark mode',
+   *   keywords: ['preference', 'ui']
+   * });
+   * 
+   * // Recall similar memories
+   * const memories = await rainfall.memory.recall({
+   *   query: 'user preferences',
+   *   topK: 5
+   * });
+   * ```
+   */
+  get memory(): Memory.MemoryClient {
+    if (!this._memory) {
+      this._memory = createMemory(this.client);
+    }
+    return this._memory;
+  }
+
+  /**
+   * Articles namespace - News aggregation and article management
+   * 
+   * @example
+   * ```typescript
+   * // Search news
+   * const articles = await rainfall.articles.search({
+   *   query: 'artificial intelligence'
+   * });
+   * 
+   * // Create from URL
+   * const article = await rainfall.articles.createFromUrl({
+   *   url: 'https://example.com/article'
+   * });
+   * 
+   * // Summarize
+   * const summary = await rainfall.articles.summarize({
+   *   text: article.content
+   * });
+   * ```
+   */
+  get articles(): Articles.ArticlesClient {
+    if (!this._articles) {
+      this._articles = createArticles(this.client);
+    }
+    return this._articles;
+  }
+
+  /**
+   * Web namespace - Web search, scraping, and content extraction
+   * 
+   * @example
+   * ```typescript
+   * // Search with Exa
+   * const results = await rainfall.web.search.exa({
+   *   query: 'latest AI research'
+   * });
+   * 
+   * // Fetch and convert
+   * const html = await rainfall.web.fetch({ url: 'https://example.com' });
+   * const markdown = await rainfall.web.htmlToMarkdown({ html });
+   * 
+   * // Extract specific elements
+   * const links = await rainfall.web.extractHtml({
+   *   html,
+   *   selector: 'a[href]'
+   * });
+   * ```
+   */
+  get web(): Web.WebClient {
+    if (!this._web) {
+      this._web = createWeb(this.client);
+    }
+    return this._web;
+  }
+
+  /**
+   * AI namespace - Embeddings, image generation, OCR, vision, chat
+   * 
+   * @example
+   * ```typescript
+   * // Generate embeddings
+   * const embedding = await rainfall.ai.embeddings.document({
+   *   text: 'Hello world'
+   * });
+   * 
+   * // Generate image
+   * const image = await rainfall.ai.image.generate({
+   *   prompt: 'A serene mountain landscape'
+   * });
+   * 
+   * // OCR
+   * const text = await rainfall.ai.ocr({ imageBase64: '...' });
+   * 
+   * // Chat
+   * const response = await rainfall.ai.chat({
+   *   messages: [{ role: 'user', content: 'Hello!' }]
+   * });
+   * ```
+   */
+  get ai(): AI.AIClient {
+    if (!this._ai) {
+      this._ai = createAI(this.client);
+    }
+    return this._ai;
+  }
+
+  /**
+   * Data namespace - CSV processing, scripts, similarity search
+   * 
+   * @example
+   * ```typescript
+   * // Query CSV with SQL
+   * const results = await rainfall.data.csv.query({
+   *   sql: 'SELECT * FROM data WHERE value > 100'
+   * });
+   * 
+   * // Execute saved script
+   * const result = await rainfall.data.scripts.execute({
+   *   name: 'my-script',
+   *   params: { input: 'data' }
+   * });
+   * ```
+   */
+  get data(): Data.DataClient {
+    if (!this._data) {
+      this._data = createData(this.client);
+    }
+    return this._data;
+  }
+
+  /**
+   * Utils namespace - Mermaid diagrams, document conversion, regex, JSON extraction
+   * 
+   * @example
+   * ```typescript
+   * // Generate diagram
+   * const diagram = await rainfall.utils.mermaid({
+   *   diagram: 'graph TD; A-->B;'
+   * });
+   * 
+   * // Convert document
+   * const pdf = await rainfall.utils.documentConvert({
+   *   document: markdownContent,
+   *   mimeType: 'text/markdown',
+   *   format: 'pdf'
+   * });
+   * 
+   * // Extract JSON from text
+   * const json = await rainfall.utils.jsonExtract({
+   *   text: 'Here is some data: {"key": "value"}'
+   * });
+   * ```
+   */
+  get utils(): Utils.UtilsClient {
+    if (!this._utils) {
+      this._utils = createUtils(this.client);
+    }
+    return this._utils;
+  }
+
+  /**
+   * Get the underlying HTTP client for advanced usage
+   */
+  getClient(): RainfallClient {
+    return this.client;
+  }
+
+  /**
+   * List all available tools
+   */
+  async listTools() {
+    return this.client.listTools();
+  }
+
+  /**
+   * Get schema for a specific tool
+   */
+  async getToolSchema(toolId: string) {
+    return this.client.getToolSchema(toolId);
+  }
+
+  /**
+   * Execute any tool by ID (low-level access)
+   */
+  async executeTool<T = unknown>(toolId: string, params?: Record<string, unknown>) {
+    return this.client.executeTool<T>(toolId, params);
+  }
+
+  /**
+   * Get current subscriber info and usage
+   */
+  async getMe() {
+    return this.client.getMe();
+  }
+
+  /**
+   * Get current rate limit info
+   */
+  getRateLimitInfo() {
+    return this.client.getRateLimitInfo();
+  }
+}
