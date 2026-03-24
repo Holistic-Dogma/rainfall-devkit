@@ -17,6 +17,7 @@ import { RainfallConfig } from '../types.js';
 import { RainfallNetworkedExecutor, NetworkedExecutorOptions } from '../services/networked.js';
 import { RainfallDaemonContext, ContextOptions } from '../services/context.js';
 import { RainfallListenerRegistry } from '../services/listeners.js';
+import { MCPProxyHub, MCPClientConfig } from '../services/mcp-proxy.js';
 
 // MCP message types
 interface MCPMessage {
@@ -109,6 +110,12 @@ export interface DaemonConfig {
   networkedOptions?: NetworkedExecutorOptions;
   /** Context/memory options */
   contextOptions?: ContextOptions;
+  /** Enable MCP proxy hub (default: true) */
+  enableMcpProxy?: boolean;
+  /** Namespace prefix for MCP tools (default: true) */
+  mcpNamespacePrefix?: boolean;
+  /** Pre-configured MCP clients to connect on startup */
+  mcpClients?: MCPClientConfig[];
 }
 
 export interface DaemonStatus {
@@ -116,6 +123,8 @@ export interface DaemonStatus {
   port?: number;
   openaiPort?: number;
   toolsLoaded: number;
+  mcpClients?: number;
+  mcpTools?: number;
   clientsConnected: number;
   edgeNodeId?: string;
   context: {
@@ -147,12 +156,17 @@ export class RainfallDaemon {
   private networkedExecutor?: RainfallNetworkedExecutor;
   private context?: RainfallDaemonContext;
   private listeners?: RainfallListenerRegistry;
+  private mcpProxy?: MCPProxyHub;
+  private enableMcpProxy: boolean;
+  private mcpNamespacePrefix: boolean;
 
   constructor(config: DaemonConfig = {}) {
     this.port = config.port || 8765;
     this.openaiPort = config.openaiPort || 8787;
     this.rainfallConfig = config.rainfallConfig;
     this.debug = config.debug || false;
+    this.enableMcpProxy = config.enableMcpProxy ?? true;
+    this.mcpNamespacePrefix = config.mcpNamespacePrefix ?? true;
     this.openaiApp = express();
     this.openaiApp.use(express.json());
   }
@@ -204,6 +218,23 @@ export class RainfallDaemon {
     // Load all available tools
     await this.loadTools();
 
+    // Initialize MCP Proxy Hub
+    if (this.enableMcpProxy) {
+      this.mcpProxy = new MCPProxyHub({ debug: this.debug });
+      await this.mcpProxy.initialize();
+
+      // Connect pre-configured MCP clients
+      if (this.rainfallConfig?.mcpClients) {
+        for (const clientConfig of this.rainfallConfig.mcpClients) {
+          try {
+            await this.mcpProxy.connectClient(clientConfig);
+          } catch (error) {
+            this.log(`Failed to connect MCP client ${clientConfig.name}:`, error);
+          }
+        }
+      }
+    }
+
     // Start WebSocket server for MCP
     await this.startWebSocketServer();
 
@@ -235,6 +266,12 @@ export class RainfallDaemon {
     // Unregister edge node
     if (this.networkedExecutor) {
       await this.networkedExecutor.unregisterEdgeNode();
+    }
+
+    // Shutdown MCP Proxy Hub
+    if (this.mcpProxy) {
+      await this.mcpProxy.shutdown();
+      this.mcpProxy = undefined;
     }
 
     // Close all WebSocket clients
@@ -271,6 +308,33 @@ export class RainfallDaemon {
    */
   getListenerRegistry(): RainfallListenerRegistry | undefined {
     return this.listeners;
+  }
+
+  /**
+   * Get the MCP Proxy Hub for managing external MCP clients
+   */
+  getMCPProxy(): MCPProxyHub | undefined {
+    return this.mcpProxy;
+  }
+
+  /**
+   * Connect an MCP client dynamically
+   */
+  async connectMCPClient(config: MCPClientConfig): Promise<string> {
+    if (!this.mcpProxy) {
+      throw new Error('MCP Proxy Hub is not enabled');
+    }
+    return this.mcpProxy.connectClient(config);
+  }
+
+  /**
+   * Disconnect an MCP client
+   */
+  async disconnectMCPClient(name: string): Promise<void> {
+    if (!this.mcpProxy) {
+      throw new Error('MCP Proxy Hub is not enabled');
+    }
+    return this.mcpProxy.disconnectClient(name);
   }
 
   private async initializeRainfall(): Promise<void> {
@@ -391,7 +455,7 @@ export class RainfallDaemon {
         
         try {
           const startTime = Date.now();
-          const result = await this.executeTool(toolName, toolParams);
+          const result = await this.executeToolWithMCP(toolName, toolParams);
           const duration = Date.now() - startTime;
 
           // Record execution in context
@@ -455,6 +519,7 @@ export class RainfallDaemon {
   private async getMCPTools(): Promise<unknown[]> {
     const mcpTools: unknown[] = [];
 
+    // Add Rainfall tools
     for (const tool of this.tools) {
       const schema = await this.getToolSchema(tool.id);
       if (schema) {
@@ -471,6 +536,18 @@ export class RainfallDaemon {
       }
     }
 
+    // Add MCP proxy tools with namespace prefix
+    if (this.mcpProxy) {
+      const proxyTools = this.mcpProxy.getAllTools({ namespacePrefix: this.mcpNamespacePrefix });
+      for (const tool of proxyTools) {
+        mcpTools.push({
+          name: this.mcpNamespacePrefix ? `${tool.serverName}-${tool.name}` : tool.name,
+          description: tool.description,
+          inputSchema: tool.inputSchema || { type: 'object', properties: {} },
+        });
+      }
+    }
+
     return mcpTools;
   }
 
@@ -480,6 +557,43 @@ export class RainfallDaemon {
     }
 
     return this.rainfall.executeTool(toolId, params);
+  }
+
+  /**
+   * Execute a tool, trying MCP proxy first, then falling back to Rainfall tools
+   */
+  private async executeToolWithMCP(
+    toolName: string, 
+    params?: Record<string, unknown>
+  ): Promise<unknown> {
+    // First, try to execute via MCP proxy if enabled
+    if (this.mcpProxy) {
+      try {
+        // Check if this is a namespaced tool (e.g., "chrome-take_screenshot")
+        if (this.mcpNamespacePrefix && toolName.includes('-')) {
+          const namespace = toolName.split('-')[0];
+          const actualToolName = toolName.slice(namespace.length + 1);
+          
+          // Check if this namespace exists in MCP proxy
+          if (this.mcpProxy.getClient(namespace)) {
+            return await this.mcpProxy.callTool(toolName, params || {}, {
+              namespace,
+            });
+          }
+        }
+        
+        // Try without namespace
+        return await this.mcpProxy.callTool(toolName, params || {});
+      } catch (error) {
+        // If tool not found in MCP proxy, fall through to Rainfall tools
+        if (error instanceof Error && !error.message.includes('not found')) {
+          throw error;
+        }
+      }
+    }
+
+    // Fall back to Rainfall tool execution
+    return this.executeTool(toolName, params);
   }
 
   private async startOpenAIProxy(): Promise<void> {
@@ -643,6 +757,11 @@ export class RainfallDaemon {
                 this.log(`  → Executing locally`);
                 const args = JSON.parse(toolArgsStr);
                 toolResult = await this.executeLocalTool(localTool.id, args);
+              } else if (this.mcpProxy) {
+                // Try MCP proxy (handles namespaced tools like chrome_take_screenshot)
+                this.log(`  → Trying MCP proxy`);
+                const args = JSON.parse(toolArgsStr);
+                toolResult = await this.executeToolWithMCP(toolName.replace(/_/g, '-'), args);
               } else {
                 // Check if backend should handle it (has [priority:local] marker?)
                 const shouldExecuteLocal = body.tool_priority === 'local' || 
@@ -712,14 +831,55 @@ export class RainfallDaemon {
 
     // Health check endpoint
     this.openaiApp.get('/health', (_req: Request, res: Response) => {
+      const mcpStats = this.mcpProxy?.getStats();
       res.json({
         status: 'ok',
         daemon: 'rainfall',
-        version: '0.1.0',
+        version: '0.2.0',
         tools_loaded: this.tools.length,
+        mcp_clients: mcpStats?.totalClients || 0,
+        mcp_tools: mcpStats?.totalTools || 0,
         edge_node_id: this.networkedExecutor?.getEdgeNodeId(),
         clients_connected: this.clients.size,
       });
+    });
+
+    // MCP proxy endpoints
+    this.openaiApp.get('/v1/mcp/clients', (_req: Request, res: Response) => {
+      if (!this.mcpProxy) {
+        res.status(503).json({ error: 'MCP proxy not enabled' });
+        return;
+      }
+      res.json(this.mcpProxy.listClients());
+    });
+
+    this.openaiApp.post('/v1/mcp/connect', async (req: Request, res: Response) => {
+      if (!this.mcpProxy) {
+        res.status(503).json({ error: 'MCP proxy not enabled' });
+        return;
+      }
+      try {
+        const name = await this.mcpProxy.connectClient(req.body);
+        res.json({ success: true, client: name });
+      } catch (error) {
+        res.status(500).json({ 
+          error: error instanceof Error ? error.message : 'Failed to connect MCP client' 
+        });
+      }
+    });
+
+    this.openaiApp.post('/v1/mcp/disconnect', async (req: Request, res: Response) => {
+      if (!this.mcpProxy) {
+        res.status(503).json({ error: 'MCP proxy not enabled' });
+        return;
+      }
+      const { name } = req.body;
+      if (!name) {
+        res.status(400).json({ error: 'Missing required field: name' });
+        return;
+      }
+      await this.mcpProxy.disconnectClient(name);
+      res.json({ success: true });
     });
 
     // Status endpoint with full daemon info
@@ -893,6 +1053,7 @@ export class RainfallDaemon {
     switch (provider) {
       case 'local':
       case 'ollama':
+      case 'custom':
         return this.callLocalLLM(params, config);
       
       case 'openai':
@@ -943,6 +1104,7 @@ export class RainfallDaemon {
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${apiKey}`,
+        'User-Agent': 'Rainfall-DevKit/1.0',
       },
       body: JSON.stringify({
         model,
@@ -981,6 +1143,7 @@ export class RainfallDaemon {
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${apiKey}`,
+        'User-Agent': 'Rainfall-DevKit/1.0',
       },
       body: JSON.stringify({
         model,
@@ -1075,7 +1238,8 @@ export class RainfallDaemon {
   private async getOpenAITools(): Promise<ToolDefinition[]> {
     const tools: ToolDefinition[] = [];
 
-    for (const tool of this.tools.slice(0, 128)) { // Limit to first 128 tools
+    // Add Rainfall tools (limit to first 100 to leave room for MCP tools)
+    for (const tool of this.tools.slice(0, 100)) {
       const schema = await this.getToolSchema(tool.id);
       if (schema) {
         const toolSchema = schema as {
@@ -1102,6 +1266,28 @@ export class RainfallDaemon {
             name: tool.id.replace(/-/g, '_'), // OpenAI requires underscore names
             description: toolSchema.description || tool.description,
             parameters,
+          },
+        });
+      }
+    }
+
+    // Add MCP proxy tools with namespace prefix
+    if (this.mcpProxy) {
+      const proxyTools = this.mcpProxy.getAllTools({ namespacePrefix: this.mcpNamespacePrefix });
+      for (const tool of proxyTools.slice(0, 28)) { // Limit to 28 MCP tools (100 + 28 = 128)
+        const inputSchema = tool.inputSchema as Record<string, unknown> || {};
+        tools.push({
+          type: 'function',
+          function: {
+            name: this.mcpNamespacePrefix 
+              ? `${tool.serverName}_${tool.name}`.replace(/-/g, '_')
+              : tool.name.replace(/-/g, '_'),
+            description: `[${tool.serverName}] ${tool.description}`,
+            parameters: {
+              type: 'object',
+              properties: (inputSchema.properties as Record<string, unknown>) || {},
+              required: (inputSchema.required as string[]) || [],
+            },
           },
         });
       }
@@ -1179,3 +1365,6 @@ export function getDaemonStatus(): DaemonStatus | null {
 export function getDaemonInstance(): RainfallDaemon | null {
   return daemonInstance;
 }
+
+// Re-export MCP types for convenience
+export { MCPProxyHub, MCPClientConfig, MCPTransportType, MCPClientInfo, MCPToolInfo } from '../services/mcp-proxy.js';

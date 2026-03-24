@@ -9,13 +9,17 @@ import { homedir } from 'os';
 const CONFIG_DIR = join(homedir(), '.rainfall');
 const CONFIG_FILE = join(CONFIG_DIR, 'config.json');
 
+export function getConfigDir(): string {
+  return CONFIG_DIR;
+}
+
 /**
  * LLM Provider configuration
  * Supports: rainfall (default), openai, anthropic, ollama, local
  */
 export interface LLMConfig {
   /** Provider type - defaults to 'rainfall' for credit-based usage */
-  provider: 'rainfall' | 'openai' | 'anthropic' | 'ollama' | 'local';
+  provider: 'rainfall' | 'openai' | 'anthropic' | 'ollama' | 'local' | 'custom';
   /** API key for the provider (not needed for ollama/local) */
   apiKey?: string;
   /** Base URL for the provider (e.g., 'http://localhost:11434/v1' for ollama) */
@@ -38,6 +42,14 @@ export interface Config {
    * This field is kept for backward compatibility
    */
   openaiApiKey?: string;
+  /** Edge node ID (assigned by backend on registration) */
+  edgeNodeId?: string;
+  /** Edge node JWT secret (for authentication with backend) */
+  edgeNodeSecret?: string;
+  /** Path to edge node key pair directory */
+  edgeNodeKeysPath?: string;
+  /** Enable secure mode (JWT validation, ACLs, encryption) */
+  secureMode?: boolean;
 }
 
 /**
@@ -134,6 +146,7 @@ export function getProviderBaseUrl(config: Config): string {
     case 'ollama':
       return config.llm?.baseUrl || 'http://localhost:11434/v1';
     case 'local':
+    case 'custom':
       return config.llm?.baseUrl || 'http://localhost:1234/v1';
     case 'rainfall':
     default:

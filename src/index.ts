@@ -89,3 +89,20 @@ export {
   type ListenerEvent,
   type ListenerRegistry,
 } from './services/listeners.js';
+
+// Security exports
+export {
+  EdgeNodeSecurity,
+  createEdgeNodeSecurity,
+  SecureEdgeClient,
+  createSecureEdgeClient,
+  type EdgeNodeJWT,
+  type JWTPayload,
+  type ACLCheck,
+  type ACLResult,
+  type EncryptedPayload,
+  type KeyPair,
+  type SecureJob,
+  type JobResult,
+  type SecureEdgeConfig,
+} from './security/index.js';

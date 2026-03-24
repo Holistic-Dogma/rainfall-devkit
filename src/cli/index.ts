@@ -3,12 +3,13 @@
  * Rainfall CLI - Command line interface for Rainfall API
  */
 
-import { readFileSync, existsSync } from 'fs';
+import { readFileSync, existsSync, mkdirSync, writeFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { Rainfall } from '../sdk.js';
-import { loadConfig, saveConfig } from './config.js';
+import { loadConfig, saveConfig, getConfigDir } from './config.js';
 import { spawn } from 'child_process';
+import { createEdgeNodeSecurity, type KeyPair } from '../security/edge-node.js';
 
 function printHelp(): void {
   console.log(`
@@ -42,6 +43,9 @@ Commands:
   config set <key> <value>      Set configuration value
   config llm                    Show LLM configuration
   
+  edge generate-keys            Generate key pair for edge node encryption
+  edge status                   Show edge node security status
+  
   version                       Show version information
   upgrade                       Upgrade to the latest version
   
@@ -62,6 +66,9 @@ Options for 'run':
 Options for 'daemon start':
   --port <port>                 WebSocket port (default: 8765)
   --openai-port <port>          OpenAI API port (default: 8787)
+  --mcp-proxy                   Enable MCP proxy hub (default: enabled)
+  --no-mcp-proxy                Disable MCP proxy hub
+  --secure                      Enable edge node security (JWT, ACLs, encryption)
   --debug                       Enable verbose debug logging
 
 Examples:
@@ -526,10 +533,13 @@ function configLLM(): void {
   console.log('  anthropic - Use Anthropic API directly');
   console.log('  ollama    - Use local Ollama instance');
   console.log('  local     - Use any OpenAI-compatible endpoint (LM Studio, etc.)');
+  console.log('  custom    - Use any custom OpenAI-compatible endpoint (RunPod, etc.)');
   console.log();
   console.log('Examples:');
   console.log('  rainfall config set llm.provider local');
   console.log('  rainfall config set llm.baseUrl http://localhost:1234/v1');
+  console.log('  rainfall config set llm.provider custom');
+  console.log('  rainfall config set llm.baseUrl https://your-runpod-endpoint.runpod.net/v1');
   console.log('  rainfall config set llm.provider openai');
   console.log('  rainfall config set llm.apiKey sk-...');
 }
@@ -605,6 +615,7 @@ async function daemonStart(args: string[]): Promise<void> {
   let port: number | undefined;
   let openaiPort: number | undefined;
   let debug = false;
+  let enableMcpProxy = true; // Enabled by default
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -616,13 +627,17 @@ async function daemonStart(args: string[]): Promise<void> {
       if (!isNaN(val)) openaiPort = val;
     } else if (arg === '--debug') {
       debug = true;
+    } else if (arg === '--mcp-proxy') {
+      enableMcpProxy = true;
+    } else if (arg === '--no-mcp-proxy') {
+      enableMcpProxy = false;
     }
   }
 
   const { startDaemon } = await import('../daemon/index.js');
   
   try {
-    await startDaemon({ port, openaiPort, debug });
+    await startDaemon({ port, openaiPort, debug, enableMcpProxy });
     
     // Keep the process alive
     process.on('SIGINT', async () => {
@@ -711,6 +726,8 @@ async function daemonStatus(): Promise<void> {
   console.log(`  WebSocket port: ${status.port}`);
   console.log(`  OpenAI API port: ${status.openaiPort}`);
   console.log(`  Tools loaded: ${status.toolsLoaded}`);
+  console.log(`  MCP clients: ${status.mcpClients || 0}`);
+  console.log(`  MCP tools: ${status.mcpTools || 0}`);
   console.log(`  Clients connected: ${status.clientsConnected}`);
   console.log(`  Edge Node ID: ${status.edgeNodeId || 'local'}`);
   console.log();
@@ -755,6 +772,89 @@ async function workflowRun(args: string[]): Promise<void> {
   
   console.log(`🚧 Running workflow: ${workflowId}`);
   console.log('Workflow execution coming soon!');
+}
+
+// Edge node commands
+async function edgeGenerateKeys(): Promise<void> {
+  console.log('🔐 Generating edge node key pair...\n');
+  
+  try {
+    const security = await createEdgeNodeSecurity();
+    const keyPair = await security.generateKeyPair();
+    
+    // Save keys to config directory
+    const configDir = getConfigDir();
+    const keysDir = join(configDir, 'keys');
+    
+    if (!existsSync(keysDir)) {
+      mkdirSync(keysDir, { recursive: true });
+    }
+    
+    const publicKeyPath = join(keysDir, 'edge-node.pub');
+    const privateKeyPath = join(keysDir, 'edge-node.key');
+    
+    writeFileSync(publicKeyPath, keyPair.publicKey, { mode: 0o644 });
+    writeFileSync(privateKeyPath, keyPair.privateKey, { mode: 0o600 });
+    
+    console.log('✅ Key pair generated successfully!\n');
+    console.log('Public key:', keyPair.publicKey);
+    console.log('\nKey files saved to:');
+    console.log('  Public:', publicKeyPath);
+    console.log('  Private:', privateKeyPath);
+    console.log('\n📋 To register this edge node:');
+    console.log('  1. Copy the public key above');
+    console.log('  2. Register with: rainfall edge register <public-key>');
+    console.log('  3. The backend will return an edgeNodeSecret (JWT)');
+    console.log('  4. Store the secret securely - it expires in 30 days');
+    
+  } catch (error) {
+    console.error('❌ Failed to generate keys:', error instanceof Error ? error.message : error);
+    process.exit(1);
+  }
+}
+
+async function edgeStatus(): Promise<void> {
+  const configDir = getConfigDir();
+  const keysDir = join(configDir, 'keys');
+  const publicKeyPath = join(keysDir, 'edge-node.pub');
+  const privateKeyPath = join(keysDir, 'edge-node.key');
+  
+  console.log('🔐 Edge Node Security Status\n');
+  
+  const hasPublicKey = existsSync(publicKeyPath);
+  const hasPrivateKey = existsSync(privateKeyPath);
+  
+  console.log('Key Pair:');
+  console.log('  Public key:', hasPublicKey ? '✅ Present' : '❌ Missing');
+  console.log('  Private key:', hasPrivateKey ? '✅ Present' : '❌ Missing');
+  
+  if (hasPublicKey) {
+    const publicKey = readFileSync(publicKeyPath, 'utf-8');
+    console.log('\nPublic Key:');
+    console.log('  ' + publicKey.substring(0, 50) + '...');
+  }
+  
+  const config = loadConfig();
+  if (config.edgeNodeId) {
+    console.log('\nRegistration:');
+    console.log('  Edge Node ID:', config.edgeNodeId);
+  }
+  
+  if (config.edgeNodeSecret) {
+    console.log('  JWT Secret: ✅ Present (expires: check with backend)');
+  } else {
+    console.log('  JWT Secret: ❌ Not configured');
+  }
+  
+  console.log('\n📚 Next steps:');
+  if (!hasPublicKey) {
+    console.log('  1. Run: rainfall edge generate-keys');
+  } else if (!config.edgeNodeSecret) {
+    console.log('  1. Register your edge node with the backend');
+    console.log('  2. Store the returned edgeNodeSecret in config');
+  } else {
+    console.log('  Edge node is configured and ready for secure operation');
+  }
 }
 
 async function main(): Promise<void> {
@@ -870,6 +970,21 @@ async function main(): Promise<void> {
 
     case 'upgrade':
       await upgrade();
+      break;
+
+    case 'edge':
+      switch (subcommand) {
+        case 'generate-keys':
+          await edgeGenerateKeys();
+          break;
+        case 'status':
+          await edgeStatus();
+          break;
+        default:
+          console.error('Error: Unknown edge subcommand');
+          console.error('\nUsage: rainfall edge <generate-keys|status>');
+          process.exit(1);
+      }
       break;
 
     case 'help':

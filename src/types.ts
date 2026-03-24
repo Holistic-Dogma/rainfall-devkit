@@ -8,6 +8,8 @@ export interface RainfallConfig {
   timeout?: number;
   retries?: number;
   retryDelay?: number;
+  /** Pre-configured MCP clients to connect on daemon startup */
+  mcpClients?: import('./services/mcp-proxy.js').MCPClientConfig[];
 }
 
 export interface RequestOptions {
