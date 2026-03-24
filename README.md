@@ -19,17 +19,17 @@ Utilities to leverage the backend tools we use for our own applications like [Ha
 ## Installation
 
 ```bash
-npm install @rainfall/sdk
+npm install @rainfall-devkit/sdk
 # or
-yarn add @rainfall/sdk
+yarn add @rainfall-devkit/sdk
 # or
-bun add @rainfall/sdk
+bun add @rainfall-devkit/sdk
 ```
 
 ## Quick Start
 
 ```typescript
-import { Rainfall } from '@rainfall/sdk';
+import { Rainfall } from '@rainfall-devkit/sdk';
 
 const rainfall = new Rainfall({
   apiKey: process.env.RAINFALL_API_KEY!
@@ -65,7 +65,7 @@ const memories = await rainfall.memory.recall({
 Install globally to use the CLI:
 
 ```bash
-npm install -g @rainfall/sdk
+bun add -g @rainfall-devkit/sdk
 ```
 
 ### Authentication
