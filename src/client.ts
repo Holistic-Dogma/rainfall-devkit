@@ -257,4 +257,73 @@ export class RainfallClient {
   private sleep(ms: number): Promise<void> {
     return new Promise(resolve => setTimeout(resolve, ms));
   }
+
+  /**
+   * OpenAI-compatible chat completions with tool support
+   */
+  async chatCompletions(params: {
+    subscriber_id: string;
+    messages: Array<{ role: string; content: string; name?: string }>;
+    model?: string;
+    stream?: boolean;
+    temperature?: number;
+    max_tokens?: number;
+    tools?: unknown[];
+    tool_choice?: string | { type: string; function?: { name: string } };
+    conversation_id?: string;
+    agent_name?: string;
+    incognito?: boolean;
+    tool_priority?: 'local' | 'rainfall' | 'serverside' | 'stacked';
+    enable_stacked?: boolean;
+  }): Promise<unknown> {
+    const { subscriber_id, ...body } = params;
+    
+    // If streaming, return a ReadableStream
+    if (body.stream) {
+      const url = `${this.baseUrl}/olympic/subscribers/${subscriber_id}/v1/chat/completions`;
+      
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'x-api-key': this.apiKey,
+          'Content-Type': 'application/json',
+          'Accept': 'text/event-stream',
+        },
+        body: JSON.stringify(body),
+      });
+
+      if (!response.ok) {
+        const error = await response.text();
+        throw new RainfallError(`Chat completions failed: ${error}`, 'CHAT_ERROR');
+      }
+
+      if (!response.body) {
+        throw new RainfallError('No response body', 'CHAT_ERROR');
+      }
+
+      return response.body;
+    }
+
+    // Non-streaming request
+    return this.request(
+      `/olympic/subscribers/${subscriber_id}/v1/chat/completions`,
+      {
+        method: 'POST',
+        body,
+      }
+    );
+  }
+
+  /**
+   * List available models (OpenAI-compatible format)
+   */
+  async listModels(subscriberId?: string): Promise<Array<{ id: string; [key: string]: unknown }>> {
+    const sid = subscriberId || this.subscriberId || await this.ensureSubscriberId();
+    
+    const result = await this.request<{ object: string; data: Array<{ id: string; [key: string]: unknown }> }>(
+      `/olympic/subscribers/${sid}/v1/models`
+    );
+    
+    return result.data || [];
+  }
 }

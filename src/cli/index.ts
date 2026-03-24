@@ -3,48 +3,9 @@
  * Rainfall CLI - Command line interface for Rainfall API
  */
 
-import { readFileSync, existsSync, writeFileSync, mkdirSync } from 'fs';
-import { join, dirname } from 'path';
-import { homedir } from 'os';
+import { readFileSync, existsSync } from 'fs';
 import { Rainfall } from '../sdk.js';
-
-const CONFIG_DIR = join(homedir(), '.rainfall');
-const CONFIG_FILE = join(CONFIG_DIR, 'config.json');
-
-interface Config {
-  apiKey?: string;
-  baseUrl?: string;
-}
-
-function loadConfig(): Config {
-  if (!existsSync(CONFIG_FILE)) {
-    return {};
-  }
-  try {
-    return JSON.parse(readFileSync(CONFIG_FILE, 'utf8'));
-  } catch {
-    return {};
-  }
-}
-
-function saveConfig(config: Config): void {
-  if (!existsSync(CONFIG_DIR)) {
-    mkdirSync(CONFIG_DIR, { recursive: true });
-  }
-  writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2));
-}
-
-function getRainfall(): Rainfall {
-  const config = loadConfig();
-  if (!config.apiKey) {
-    console.error('Error: No API key configured. Run: rainfall auth login');
-    process.exit(1);
-  }
-  return new Rainfall({
-    apiKey: config.apiKey,
-    baseUrl: config.baseUrl,
-  });
-}
+import { loadConfig, saveConfig } from './config.js';
 
 function printHelp(): void {
   console.log(`
@@ -63,18 +24,38 @@ Commands:
   tools search <query>          Search for tools
   
   run <tool> [options]          Execute a tool
+
+  daemon start                  Start the Rainfall daemon
+  daemon stop                   Stop the Rainfall daemon
+  daemon restart                Restart the Rainfall daemon
+  daemon status                 Check daemon status
+  
+  workflow new                  Create a new workflow (interactive)
+  workflow run <workflow>       Run a saved workflow
   
   me                            Show account info and usage
   
   config get [key]              Get configuration value
   config set <key> <value>      Set configuration value
+  config llm                    Show LLM configuration
   
   help                          Show this help message
+
+Configuration keys:
+  llm.provider                  LLM provider (rainfall|openai|anthropic|ollama|local)
+  llm.baseUrl                   Base URL for the LLM API
+  llm.apiKey                    API key for the LLM provider
+  llm.model                     Default model to use
 
 Options for 'run':
   --params, -p <json>           Tool parameters as JSON
   --file, -f <path>             Read parameters from file
   --raw                         Output raw JSON
+
+Options for 'daemon start':
+  --port <port>                 WebSocket port (default: 8765)
+  --openai-port <port>          OpenAI API port (default: 8787)
+  --debug                       Enable verbose debug logging
 
 Examples:
   rainfall auth login
@@ -82,8 +63,21 @@ Examples:
   rainfall tools describe github-create-issue
   rainfall run exa-web-search -p '{"query": "AI news"}'
   rainfall run article-summarize -f ./article.json
+  rainfall daemon start
   echo '{"query": "hello"}' | rainfall run exa-web-search
 `);
+}
+
+function getRainfall(): Rainfall {
+  const config = loadConfig();
+  if (!config.apiKey) {
+    console.error('Error: No API key configured. Run: rainfall auth login');
+    process.exit(1);
+  }
+  return new Rainfall({
+    apiKey: config.apiKey,
+    baseUrl: config.baseUrl,
+  });
 }
 
 async function authLogin(args: string[]): Promise<void> {
@@ -415,7 +409,17 @@ function configGet(args: string[]): void {
   const config = loadConfig();
   
   if (key) {
-    console.log(config[key as keyof Config] || '');
+    // Support nested keys like "llm.provider"
+    const parts = key.split('.');
+    let value: unknown = config;
+    for (const part of parts) {
+      value = (value as Record<string, unknown>)?.[part];
+    }
+    if (typeof value === 'object' && value !== null) {
+      console.log(JSON.stringify(value, null, 2));
+    } else {
+      console.log(value ?? '');
+    }
   } else {
     console.log(JSON.stringify(config, null, 2));
   }
@@ -428,13 +432,214 @@ function configSet(args: string[]): void {
   if (!key || !value) {
     console.error('Error: Both key and value required');
     console.error('\nUsage: rainfall config set <key> <value>');
+    console.error('\nExamples:');
+    console.error('  rainfall config set llm.provider local');
+    console.error('  rainfall config set llm.baseUrl http://localhost:1234/v1');
+    console.error('  rainfall config set llm.model llama-3.3-70b-versatile');
     process.exit(1);
   }
 
   const config = loadConfig();
-  (config as Record<string, string>)[key] = value;
+  
+  // Support nested keys like "llm.provider"
+  const parts = key.split('.');
+  if (parts.length === 1) {
+    (config as Record<string, unknown>)[key] = value;
+  } else {
+    let target: Record<string, unknown> = config as Record<string, unknown>;
+    for (let i = 0; i < parts.length - 1; i++) {
+      if (!target[parts[i]] || typeof target[parts[i]] !== 'object') {
+        target[parts[i]] = {};
+      }
+      target = target[parts[i]] as Record<string, unknown>;
+    }
+    target[parts[parts.length - 1]] = value;
+  }
+  
   saveConfig(config);
   console.log(`✓ Set ${key} = ${value}`);
+}
+
+function configLLM(): void {
+  const config = loadConfig();
+  const llm = config.llm || { provider: 'rainfall' };
+  
+  console.log('LLM Configuration:');
+  console.log(`  Provider: ${llm.provider}`);
+  console.log(`  Base URL: ${llm.baseUrl || '(default)'}`);
+  console.log(`  Model: ${llm.model || '(default)'}`);
+  console.log(`  API Key: ${llm.apiKey ? '****' + llm.apiKey.slice(-4) : '(none)'}`);
+  console.log();
+  console.log('Providers:');
+  console.log('  rainfall  - Use Rainfall backend (default, uses your credits)');
+  console.log('  openai    - Use OpenAI API directly');
+  console.log('  anthropic - Use Anthropic API directly');
+  console.log('  ollama    - Use local Ollama instance');
+  console.log('  local     - Use any OpenAI-compatible endpoint (LM Studio, etc.)');
+  console.log();
+  console.log('Examples:');
+  console.log('  rainfall config set llm.provider local');
+  console.log('  rainfall config set llm.baseUrl http://localhost:1234/v1');
+  console.log('  rainfall config set llm.provider openai');
+  console.log('  rainfall config set llm.apiKey sk-...');
+}
+
+// Daemon commands
+async function daemonStart(args: string[]): Promise<void> {
+  // Parse options
+  let port: number | undefined;
+  let openaiPort: number | undefined;
+  let debug = false;
+
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === '--port') {
+      const val = parseInt(args[++i], 10);
+      if (!isNaN(val)) port = val;
+    } else if (arg === '--openai-port') {
+      const val = parseInt(args[++i], 10);
+      if (!isNaN(val)) openaiPort = val;
+    } else if (arg === '--debug') {
+      debug = true;
+    }
+  }
+
+  const { startDaemon } = await import('../daemon/index.js');
+  
+  try {
+    await startDaemon({ port, openaiPort, debug });
+    
+    // Keep the process alive
+    process.on('SIGINT', async () => {
+      console.log('\n');
+      const { stopDaemon } = await import('../daemon/index.js');
+      await stopDaemon();
+      process.exit(0);
+    });
+    
+    process.on('SIGTERM', async () => {
+      const { stopDaemon } = await import('../daemon/index.js');
+      await stopDaemon();
+      process.exit(0);
+    });
+  } catch (error) {
+    console.error('Failed to start daemon:', error instanceof Error ? error.message : error);
+    process.exit(1);
+  }
+}
+
+async function daemonStop(): Promise<void> {
+  const { stopDaemon } = await import('../daemon/index.js');
+  await stopDaemon();
+}
+
+async function daemonRestart(args: string[]): Promise<void> {
+  const { stopDaemon, startDaemon } = await import('../daemon/index.js');
+  
+  // Parse options
+  let port: number | undefined;
+  let openaiPort: number | undefined;
+  let debug = false;
+
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === '--port') {
+      const val = parseInt(args[++i], 10);
+      if (!isNaN(val)) port = val;
+    } else if (arg === '--openai-port') {
+      const val = parseInt(args[++i], 10);
+      if (!isNaN(val)) openaiPort = val;
+    } else if (arg === '--debug') {
+      debug = true;
+    }
+  }
+
+  console.log('🔄 Restarting daemon...');
+  
+  try {
+    await stopDaemon();
+    // Small delay to ensure cleanup
+    await new Promise(resolve => setTimeout(resolve, 500));
+    await startDaemon({ port, openaiPort, debug });
+    
+    // Keep the process alive
+    process.on('SIGINT', async () => {
+      console.log('\n');
+      const { stopDaemon: stop } = await import('../daemon/index.js');
+      await stop();
+      process.exit(0);
+    });
+    
+    process.on('SIGTERM', async () => {
+      const { stopDaemon: stop } = await import('../daemon/index.js');
+      await stop();
+      process.exit(0);
+    });
+  } catch (error) {
+    console.error('Failed to restart daemon:', error instanceof Error ? error.message : error);
+    process.exit(1);
+  }
+}
+
+async function daemonStatus(): Promise<void> {
+  const { getDaemonStatus } = await import('../daemon/index.js');
+  const status = getDaemonStatus();
+  
+  if (!status) {
+    console.log('Daemon not running');
+    console.log('Run: rainfall daemon start');
+    return;
+  }
+  
+  console.log('Daemon status:');
+  console.log(`  Running: ${status.running ? 'yes' : 'no'}`);
+  console.log(`  WebSocket port: ${status.port}`);
+  console.log(`  OpenAI API port: ${status.openaiPort}`);
+  console.log(`  Tools loaded: ${status.toolsLoaded}`);
+  console.log(`  Clients connected: ${status.clientsConnected}`);
+  console.log(`  Edge Node ID: ${status.edgeNodeId || 'local'}`);
+  console.log();
+  console.log('Context:');
+  console.log(`  Memories cached: ${status.context.memoriesCached}`);
+  console.log(`  Active sessions: ${status.context.activeSessions}`);
+  console.log(`  Current session: ${status.context.currentSession || 'none'}`);
+  console.log(`  Execution history: ${status.context.executionHistorySize}`);
+  console.log();
+  console.log('Listeners:');
+  console.log(`  File watchers: ${status.listeners.fileWatchers}`);
+  console.log(`  Cron triggers: ${status.listeners.cronTriggers}`);
+  console.log(`  Recent events: ${status.listeners.recentEvents}`);
+}
+
+// Workflow commands
+async function workflowNew(): Promise<void> {
+  console.log('🚧 Interactive workflow creation coming soon!');
+  console.log();
+  console.log('For now, create workflows using the SDK:');
+  console.log('  import { createFileWatcherWorkflow } from "@rainfall-devkit/sdk/daemon";');
+  console.log();
+  console.log('Example:');
+  console.log(`  const workflow = createFileWatcherWorkflow('pdf-processor', '~/Downloads', {`);
+  console.log(`    pattern: '*.pdf',`);
+  console.log(`    events: ['create'],`);
+  console.log(`    workflow: [`);
+  console.log(`      { toolId: 'ocr-pdf', params: {} },`);
+  console.log(`      { toolId: 'notion-create-page', params: { parent: '...' } },`);
+  console.log(`    ],`);
+  console.log(`  });`);
+}
+
+async function workflowRun(args: string[]): Promise<void> {
+  const workflowId = args[0];
+  
+  if (!workflowId) {
+    console.error('Error: Workflow ID required');
+    console.error('\nUsage: rainfall workflow run <workflow-id>');
+    process.exit(1);
+  }
+  
+  console.log(`🚧 Running workflow: ${workflowId}`);
+  console.log('Workflow execution coming soon!');
 }
 
 async function main(): Promise<void> {
@@ -484,6 +689,42 @@ async function main(): Promise<void> {
       await runTool(args.slice(1));
       break;
 
+    case 'daemon':
+      switch (subcommand) {
+        case 'start':
+          await daemonStart(rest);
+          break;
+        case 'stop':
+          await daemonStop();
+          break;
+        case 'restart':
+          await daemonRestart(rest);
+          break;
+        case 'status':
+          await daemonStatus();
+          break;
+        default:
+          console.error('Error: Unknown daemon subcommand');
+          console.error('\nUsage: rainfall daemon <start|stop|restart|status>');
+          process.exit(1);
+      }
+      break;
+
+    case 'workflow':
+      switch (subcommand) {
+        case 'new':
+          await workflowNew();
+          break;
+        case 'run':
+          await workflowRun(rest);
+          break;
+        default:
+          console.error('Error: Unknown workflow subcommand');
+          console.error('\nUsage: rainfall workflow <new|run>');
+          process.exit(1);
+      }
+      break;
+
     case 'me':
       await showMe();
       break;
@@ -496,9 +737,12 @@ async function main(): Promise<void> {
         case 'set':
           configSet(rest);
           break;
+        case 'llm':
+          configLLM();
+          break;
         default:
           console.error('Error: Unknown config subcommand');
-          console.error('\nUsage: rainfall config <get|set>');
+          console.error('\nUsage: rainfall config <get|set|llm>');
           process.exit(1);
       }
       break;

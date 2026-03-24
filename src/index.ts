@@ -62,3 +62,30 @@ export type {
 
 // Version
 export const VERSION = '0.1.0';
+
+// Daemon service exports (for programmatic use)
+export {
+  RainfallNetworkedExecutor,
+  type NodeCapabilities,
+  type EdgeNodeRegistration,
+  type QueuedJob,
+  type NetworkedExecutorOptions,
+} from './services/networked.js';
+
+export {
+  RainfallDaemonContext,
+  type MemoryEntry,
+  type SessionContext,
+  type ToolExecutionRecord,
+  type ContextOptions,
+} from './services/context.js';
+
+export {
+  RainfallListenerRegistry,
+  createFileWatcherWorkflow,
+  createCronWorkflow,
+  type FileWatcherConfig,
+  type CronTriggerConfig,
+  type ListenerEvent,
+  type ListenerRegistry,
+} from './services/listeners.js';

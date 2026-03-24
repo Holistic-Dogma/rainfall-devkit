@@ -263,4 +263,63 @@ export class Rainfall {
   getRateLimitInfo() {
     return this.client.getRateLimitInfo();
   }
+
+  /**
+   * OpenAI-compatible chat completions with tool support
+   * 
+   * @example
+   * ```typescript
+   * // Simple chat
+   * const response = await rainfall.chatCompletions({
+   *   subscriber_id: 'my-subscriber',
+   *   messages: [{ role: 'user', content: 'Hello!' }],
+   *   model: 'llama-3.3-70b-versatile'
+   * });
+   * 
+   * // With tools
+   * const response = await rainfall.chatCompletions({
+   *   subscriber_id: 'my-subscriber',
+   *   messages: [{ role: 'user', content: 'Search for AI news' }],
+   *   tools: [{ type: 'function', function: { name: 'web-search' } }],
+   *   enable_stacked: true
+   * });
+   * 
+   * // Streaming
+   * const stream = await rainfall.chatCompletions({
+   *   subscriber_id: 'my-subscriber',
+   *   messages: [{ role: 'user', content: 'Tell me a story' }],
+   *   stream: true
+   * });
+   * ```
+   */
+  async chatCompletions(params: {
+    subscriber_id: string;
+    messages: Array<{ role: string; content: string; name?: string }>;
+    model?: string;
+    stream?: boolean;
+    temperature?: number;
+    max_tokens?: number;
+    tools?: unknown[];
+    tool_choice?: string | { type: string; function?: { name: string } };
+    conversation_id?: string;
+    agent_name?: string;
+    incognito?: boolean;
+    tool_priority?: 'local' | 'rainfall' | 'serverside' | 'stacked';
+    enable_stacked?: boolean;
+  }): Promise<unknown> {
+    return this.client.chatCompletions(params);
+  }
+
+  /**
+   * List available models (OpenAI-compatible format)
+   * 
+   * @example
+   * ```typescript
+   * const models = await rainfall.listModels();
+   * console.log(models); // [{ id: 'llama-3.3-70b-versatile', ... }]
+   * ```
+   */
+  async listModels(subscriberId?: string): Promise<Array<{ id: string; [key: string]: unknown }>> {
+    return this.client.listModels(subscriberId);
+  }
 }

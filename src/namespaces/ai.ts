@@ -22,5 +22,11 @@ export function createAI(client: RainfallClient): AI.AIClient {
     complete: (params) => client.executeTool('fim', params),
     classify: (params) => client.executeTool('jina-document-classifier', params),
     segment: (params) => client.executeTool('jina-text-segmenter', params),
+    
+    /**
+     * OpenAI-compatible chat completions with full tool support
+     * This is the recommended method for multi-turn conversations with tools
+     */
+    chatCompletions: (params) => client.chatCompletions(params),
   };
 }

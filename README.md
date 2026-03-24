@@ -339,6 +339,57 @@ try {
 }
 ```
 
+## Daemon
+
+Run a local daemon with WebSocket (MCP) and OpenAI-compatible API endpoints:
+
+```bash
+# Start the daemon
+rainfall daemon start
+
+# Start with custom ports
+rainfall daemon start --port 8765 --openai-port 8787
+
+# Check status
+rainfall daemon status
+
+# Stop the daemon
+rainfall daemon stop
+```
+
+### Using the Daemon
+
+**WebSocket (MCP) Endpoint:** `ws://localhost:8765`
+
+**OpenAI-compatible API:** `http://localhost:8787/v1/chat/completions`
+
+```bash
+# Test the OpenAI-compatible endpoint
+curl http://localhost:8787/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "rainfall",
+    "messages": [{"role": "user", "content": "hello"}]
+  }'
+```
+
+### Programmatic Usage
+
+```typescript
+import { RainfallDaemon } from '@rainfall-devkit/sdk/daemon';
+
+const daemon = new RainfallDaemon({
+  port: 8765,        // WebSocket/MCP port
+  openaiPort: 8787,  // OpenAI-compatible API port
+});
+
+await daemon.start();
+// Daemon is running with all Rainfall tools loaded
+
+// Later...
+await daemon.stop();
+```
+
 ## MCP Server
 
 Use Rainfall with Claude, Cursor, and other MCP-compatible assistants:

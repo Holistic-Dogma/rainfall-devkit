@@ -1,0 +1,1181 @@
+/**
+ * Rainfall Daemon - Local websocket server + OpenAI-compatible proxy
+ * 
+ * Provides:
+ * - WebSocket server for MCP clients (Claude, Cursor, etc.)
+ * - OpenAI-compatible /v1/chat/completions endpoint
+ * - Hot-loaded tools from Rainfall SDK
+ * - Networked execution for distributed workflows
+ * - Persistent context and memory
+ * - Passive listeners (file watchers, cron triggers)
+ */
+
+import { WebSocketServer, WebSocket } from 'ws';
+import express, { Request, Response } from 'express';
+import { Rainfall } from '../sdk.js';
+import { RainfallConfig } from '../types.js';
+import { RainfallNetworkedExecutor, NetworkedExecutorOptions } from '../services/networked.js';
+import { RainfallDaemonContext, ContextOptions } from '../services/context.js';
+import { RainfallListenerRegistry } from '../services/listeners.js';
+
+// MCP message types
+interface MCPMessage {
+  jsonrpc: '2.0';
+  id?: string | number;
+  method?: string;
+  params?: Record<string, unknown>;
+  result?: unknown;
+  error?: {
+    code: number;
+    message: string;
+    data?: unknown;
+  };
+}
+
+// OpenAI-compatible types
+interface ChatCompletionMessage {
+  role: 'system' | 'user' | 'assistant' | 'tool';
+  content: string;
+  name?: string;
+  tool_calls?: ToolCall[];
+  tool_call_id?: string;
+}
+
+interface ToolCall {
+  id: string;
+  type: 'function';
+  function: {
+    name: string;
+    arguments: string;
+  };
+}
+
+interface LLMCallParams {
+  subscriberId: string;
+  model?: string;
+  messages: ChatCompletionMessage[];
+  tools?: unknown[];
+  tool_choice?: string | { type: string; function?: { name: string } };
+  temperature?: number;
+  max_tokens?: number;
+  stream?: boolean;
+  tool_priority?: 'local' | 'rainfall' | 'serverside' | 'stacked';
+  enable_stacked?: boolean;
+}
+
+interface LLMResponse {
+  choices?: Array<{
+    message?: {
+      content?: string;
+      tool_calls?: ToolCall[];
+    };
+  }>;
+  id?: string;
+  model?: string;
+}
+
+interface ChatCompletionRequest {
+  model: string;
+  messages: ChatCompletionMessage[];
+  temperature?: number;
+  max_tokens?: number;
+  stream?: boolean;
+  tools?: unknown[];
+  tool_choice?: string | { type: string; function?: { name: string } };
+  // Rainfall-specific extensions
+  conversation_id?: string;
+  agent_name?: string;
+  incognito?: boolean;
+  tool_priority?: 'local' | 'rainfall' | 'serverside' | 'stacked';
+  enable_stacked?: boolean;
+}
+
+interface ToolDefinition {
+  type: 'function';
+  function: {
+    name: string;
+    description: string;
+    parameters: Record<string, unknown>;
+  };
+}
+
+export interface DaemonConfig {
+  port?: number;
+  openaiPort?: number;
+  rainfallConfig?: RainfallConfig;
+  /** Enable debug logging */
+  debug?: boolean;
+  /** Networked executor options */
+  networkedOptions?: NetworkedExecutorOptions;
+  /** Context/memory options */
+  contextOptions?: ContextOptions;
+}
+
+export interface DaemonStatus {
+  running: boolean;
+  port?: number;
+  openaiPort?: number;
+  toolsLoaded: number;
+  clientsConnected: number;
+  edgeNodeId?: string;
+  context: {
+    memoriesCached: number;
+    activeSessions: number;
+    currentSession?: string;
+    executionHistorySize: number;
+  };
+  listeners: {
+    fileWatchers: number;
+    cronTriggers: number;
+    recentEvents: number;
+  };
+}
+
+export class RainfallDaemon {
+  private wss?: WebSocketServer;
+  private openaiApp: express.Application;
+  private rainfall?: Rainfall;
+  private port: number;
+  private openaiPort: number;
+  private rainfallConfig?: RainfallConfig;
+  private tools: Array<{ id: string; name: string; description: string; category: string }> = [];
+  private toolSchemas: Map<string, unknown> = new Map();
+  private clients: Set<WebSocket> = new Set();
+  private debug: boolean;
+
+  // New services
+  private networkedExecutor?: RainfallNetworkedExecutor;
+  private context?: RainfallDaemonContext;
+  private listeners?: RainfallListenerRegistry;
+
+  constructor(config: DaemonConfig = {}) {
+    this.port = config.port || 8765;
+    this.openaiPort = config.openaiPort || 8787;
+    this.rainfallConfig = config.rainfallConfig;
+    this.debug = config.debug || false;
+    this.openaiApp = express();
+    this.openaiApp.use(express.json());
+  }
+
+  async start(): Promise<void> {
+    this.log('🌧️  Rainfall Daemon starting...');
+
+    // Initialize Rainfall SDK
+    await this.initializeRainfall();
+    if (!this.rainfall) {
+      throw new Error('Failed to initialize Rainfall SDK');
+    }
+
+    // Initialize context (persistent memory)
+    this.context = new RainfallDaemonContext(this.rainfall, {
+      maxLocalMemories: 1000,
+      maxMessageHistory: 100,
+      ...this.rainfallConfig,
+    });
+    await this.context.initialize();
+
+    // Initialize networked executor
+    this.networkedExecutor = new RainfallNetworkedExecutor(this.rainfall, {
+      wsPort: this.port,
+      httpPort: this.openaiPort,
+      hostname: process.env.HOSTNAME || 'local-daemon',
+      capabilities: {
+        localExec: true,
+        fileWatch: true,
+        passiveListen: true,
+      },
+    });
+
+    // Register edge node with Rainfall backend
+    await this.networkedExecutor.registerEdgeNode();
+
+    // Subscribe to job results
+    await this.networkedExecutor.subscribeToResults((jobId, result, error) => {
+      this.log(`📬 Job ${jobId} ${error ? 'failed' : 'completed'}`, error || result);
+    });
+
+    // Initialize listener registry
+    this.listeners = new RainfallListenerRegistry(
+      this.rainfall,
+      this.context,
+      this.networkedExecutor
+    );
+
+    // Load all available tools
+    await this.loadTools();
+
+    // Start WebSocket server for MCP
+    await this.startWebSocketServer();
+
+    // Start OpenAI-compatible HTTP server
+    await this.startOpenAIProxy();
+
+    // Log startup info
+    console.log(`🚀 Rainfall daemon running`);
+    console.log(`   WebSocket (MCP):     ws://localhost:${this.port}`);
+    console.log(`   OpenAI API:          http://localhost:${this.openaiPort}/v1/chat/completions`);
+    console.log(`   Health Check:        http://localhost:${this.openaiPort}/health`);
+    console.log(`   Edge Node ID:        ${this.networkedExecutor.getEdgeNodeId() || 'local'}`);
+    console.log(`   Tools loaded:        ${this.tools.length}`);
+    console.log(`   Press Ctrl+C to stop`);
+
+    // Setup graceful shutdown
+    process.on('SIGINT', () => this.stop());
+    process.on('SIGTERM', () => this.stop());
+  }
+
+  async stop(): Promise<void> {
+    this.log('🛑 Shutting down Rainfall daemon...');
+
+    // Stop all listeners
+    if (this.listeners) {
+      await this.listeners.stopAll();
+    }
+
+    // Unregister edge node
+    if (this.networkedExecutor) {
+      await this.networkedExecutor.unregisterEdgeNode();
+    }
+
+    // Close all WebSocket clients
+    for (const client of this.clients) {
+      client.close();
+    }
+    this.clients.clear();
+
+    // Close WebSocket server
+    if (this.wss) {
+      this.wss.close();
+      this.wss = undefined;
+    }
+
+    console.log('👋 Rainfall daemon stopped');
+  }
+
+  /**
+   * Get the networked executor for distributed job management
+   */
+  getNetworkedExecutor(): RainfallNetworkedExecutor | undefined {
+    return this.networkedExecutor;
+  }
+
+  /**
+   * Get the context for memory/session management
+   */
+  getContext(): RainfallDaemonContext | undefined {
+    return this.context;
+  }
+
+  /**
+   * Get the listener registry for passive triggers
+   */
+  getListenerRegistry(): RainfallListenerRegistry | undefined {
+    return this.listeners;
+  }
+
+  private async initializeRainfall(): Promise<void> {
+    if (this.rainfallConfig?.apiKey) {
+      this.rainfall = new Rainfall(this.rainfallConfig);
+    } else {
+      // Try to load from config file (same as CLI)
+      const { loadConfig } = await import('../cli/config.js');
+      const config = loadConfig();
+      if (config.apiKey) {
+        this.rainfall = new Rainfall({
+          apiKey: config.apiKey,
+          baseUrl: config.baseUrl,
+        });
+      } else {
+        throw new Error('No API key configured. Run: rainfall auth login <api-key>');
+      }
+    }
+  }
+
+  private async loadTools(): Promise<void> {
+    if (!this.rainfall) return;
+
+    try {
+      this.tools = await this.rainfall.listTools();
+      this.log(`📦 Loaded ${this.tools.length} tools`);
+    } catch (error) {
+      console.warn('⚠️  Failed to load tools:', error instanceof Error ? error.message : error);
+      this.tools = [];
+    }
+  }
+
+  private async getToolSchema(toolId: string): Promise<unknown> {
+    if (this.toolSchemas.has(toolId)) {
+      return this.toolSchemas.get(toolId);
+    }
+
+    if (!this.rainfall) return null;
+
+    try {
+      const schema = await this.rainfall.getToolSchema(toolId);
+      this.toolSchemas.set(toolId, schema);
+      return schema;
+    } catch {
+      return null;
+    }
+  }
+
+  private async startWebSocketServer(): Promise<void> {
+    this.wss = new WebSocketServer({ port: this.port });
+
+    this.wss.on('connection', (ws: WebSocket) => {
+      this.log('🟢 MCP client connected');
+      this.clients.add(ws);
+
+      ws.on('message', async (data: Buffer) => {
+        try {
+          const message: MCPMessage = JSON.parse(data.toString());
+          const response = await this.handleMCPMessage(message);
+          ws.send(JSON.stringify(response));
+        } catch (error) {
+          const errorResponse: MCPMessage = {
+            jsonrpc: '2.0',
+            id: undefined,
+            error: {
+              code: -32700,
+              message: error instanceof Error ? error.message : 'Parse error',
+            },
+          };
+          ws.send(JSON.stringify(errorResponse));
+        }
+      });
+
+      ws.on('close', () => {
+        this.log('🔴 MCP client disconnected');
+        this.clients.delete(ws);
+      });
+
+      ws.on('error', (error) => {
+        console.error('WebSocket error:', error);
+        this.clients.delete(ws);
+      });
+    });
+  }
+
+  private async handleMCPMessage(message: MCPMessage): Promise<MCPMessage> {
+    const { id, method, params } = message;
+
+    switch (method) {
+      case 'initialize':
+        return {
+          jsonrpc: '2.0',
+          id,
+          result: {
+            protocolVersion: '2024-11-05',
+            capabilities: {
+              tools: { listChanged: true },
+            },
+            serverInfo: {
+              name: 'rainfall-daemon',
+              version: '0.1.0',
+            },
+          },
+        };
+
+      case 'tools/list':
+        return {
+          jsonrpc: '2.0',
+          id,
+          result: {
+            tools: await this.getMCPTools(),
+          },
+        };
+
+      case 'tools/call': {
+        const toolName = params?.name as string;
+        const toolParams = params?.arguments as Record<string, unknown>;
+        
+        try {
+          const startTime = Date.now();
+          const result = await this.executeTool(toolName, toolParams);
+          const duration = Date.now() - startTime;
+
+          // Record execution in context
+          if (this.context) {
+            this.context.recordExecution(toolName, toolParams || {}, result, { duration });
+          }
+
+          return {
+            jsonrpc: '2.0',
+            id,
+            result: {
+              content: [
+                {
+                  type: 'text',
+                  text: typeof result === 'string' ? result : JSON.stringify(result, null, 2),
+                },
+              ],
+            },
+          };
+        } catch (error) {
+          const errorMessage = error instanceof Error ? error.message : 'Tool execution failed';
+          
+          // Record failed execution
+          if (this.context) {
+            this.context.recordExecution(toolName, toolParams || {}, null, { 
+              error: errorMessage,
+              duration: 0,
+            });
+          }
+
+          return {
+            jsonrpc: '2.0',
+            id,
+            error: {
+              code: -32603,
+              message: errorMessage,
+            },
+          };
+        }
+      }
+
+      case 'ping':
+        return {
+          jsonrpc: '2.0',
+          id,
+          result: {},
+        };
+
+      default:
+        return {
+          jsonrpc: '2.0',
+          id,
+          error: {
+            code: -32601,
+            message: `Method not found: ${method}`,
+          },
+        };
+    }
+  }
+
+  private async getMCPTools(): Promise<unknown[]> {
+    const mcpTools: unknown[] = [];
+
+    for (const tool of this.tools) {
+      const schema = await this.getToolSchema(tool.id);
+      if (schema) {
+        const toolSchema = schema as { 
+          name?: string; 
+          description?: string; 
+          parameters?: Record<string, unknown>;
+        };
+        mcpTools.push({
+          name: tool.id,
+          description: toolSchema.description || tool.description,
+          inputSchema: toolSchema.parameters || { type: 'object', properties: {} },
+        });
+      }
+    }
+
+    return mcpTools;
+  }
+
+  private async executeTool(toolId: string, params?: Record<string, unknown>): Promise<unknown> {
+    if (!this.rainfall) {
+      throw new Error('Rainfall SDK not initialized');
+    }
+
+    return this.rainfall.executeTool(toolId, params);
+  }
+
+  private async startOpenAIProxy(): Promise<void> {
+    // List models endpoint - proxy to Rainyday backend
+    this.openaiApp.get('/v1/models', async (_req: Request, res: Response) => {
+      try {
+        // Try to fetch models from Rainyday backend
+        if (this.rainfall) {
+          const models = await this.rainfall.listModels();
+          res.json({
+            object: 'list',
+            data: models.map((m: { id: string }) => ({
+              id: m.id,
+              object: 'model',
+              created: Math.floor(Date.now() / 1000),
+              owned_by: 'rainfall',
+            })),
+          });
+        } else {
+          // Fallback to default models
+          res.json({
+            object: 'list',
+            data: [
+              { id: 'llama-3.3-70b-versatile', object: 'model', created: Date.now(), owned_by: 'groq' },
+              { id: 'gpt-4o', object: 'model', created: Date.now(), owned_by: 'openai' },
+              { id: 'claude-3-5-sonnet', object: 'model', created: Date.now(), owned_by: 'anthropic' },
+              { id: 'gemini-2.0-flash-exp', object: 'model', created: Date.now(), owned_by: 'gemini' },
+            ],
+          });
+        }
+      } catch (error) {
+        res.status(500).json({ error: 'Failed to fetch models' });
+      }
+    });
+
+    // Chat completions endpoint - with local tool execution loop
+    this.openaiApp.post('/v1/chat/completions', async (req: Request, res: Response) => {
+      const body: ChatCompletionRequest = req.body;
+
+      // Validate request
+      if (!body.messages || !Array.isArray(body.messages)) {
+        res.status(400).json({
+          error: {
+            message: 'Missing required field: messages',
+            type: 'invalid_request_error',
+          },
+        });
+        return;
+      }
+
+      if (!this.rainfall) {
+        res.status(503).json({
+          error: {
+            message: 'Rainfall SDK not initialized',
+            type: 'service_unavailable',
+          },
+        });
+        return;
+      }
+
+      try {
+        // Get subscriber ID from SDK
+        const me = await this.rainfall.getMe();
+        const subscriberId = me.id;
+
+        // Build local tool map for quick lookup (for execution)
+        const localToolMap = await this.buildLocalToolMap();
+
+        // Only include Rainfall tools if the client explicitly requests tools
+        // or if no tools are provided but tool_choice is set
+        let allTools: unknown[] = [];
+        if (body.tools && body.tools.length > 0) {
+          // Client provided tools - use them as-is
+          allTools = body.tools;
+        } else if (body.tool_choice) {
+          // Client wants tool use but didn't provide tools - give them our tools
+          const openaiTools = await this.getOpenAITools();
+          allTools = openaiTools;
+        }
+        // else: no tools requested, don't send any
+
+        // Track messages for the conversation (mutable for tool loop)
+        let messages = [...body.messages];
+        const maxToolIterations = 10; // Prevent infinite loops
+        let toolIterations = 0;
+
+        // Tool execution loop
+        while (toolIterations < maxToolIterations) {
+          toolIterations++;
+
+          // Call the LLM (backend or local)
+          const llmResponse = await this.callLLM({
+            subscriberId,
+            model: body.model,
+            messages,
+            tools: allTools.length > 0 ? allTools : undefined,
+            tool_choice: body.tool_choice,
+            temperature: body.temperature,
+            max_tokens: body.max_tokens,
+            stream: false, // Always non-streaming for tool loop
+            tool_priority: body.tool_priority,
+            enable_stacked: body.enable_stacked,
+          });
+
+          // Check if the model wants to call tools
+          const choice = llmResponse.choices?.[0];
+          let toolCalls = choice?.message?.tool_calls || [];
+
+          // Also check for XML-style tool calls in content (some models like Qwen do this)
+          const content = choice?.message?.content || '';
+          const reasoningContent = (choice?.message as { reasoning_content?: string })?.reasoning_content || '';
+          const fullContent = content + ' ' + reasoningContent;
+
+          // Parse XML-style tool calls: <function=name><parameter=key>value</parameter></function>
+          const xmlToolCalls = this.parseXMLToolCalls(fullContent);
+          if (xmlToolCalls.length > 0) {
+            this.log(`📋 Parsed ${xmlToolCalls.length} XML tool calls from content`);
+            toolCalls = xmlToolCalls;
+          }
+
+          if (!toolCalls || toolCalls.length === 0) {
+            // No tool calls - return the final response
+            if (body.stream) {
+              // For streaming requests, we already have the response
+              // But since we did non-streaming for the loop, convert to stream format
+              await this.streamResponse(res, llmResponse);
+            } else {
+              res.json(llmResponse);
+            }
+
+            // Update context
+            this.updateContext(body.messages, llmResponse);
+            return;
+          }
+
+          // Model wants to call tools - add assistant message with tool_calls
+          messages.push({
+            role: 'assistant',
+            content: choice?.message?.content || '',
+            tool_calls: toolCalls as ToolCall[],
+          });
+
+          // Execute each tool call
+          for (const toolCall of toolCalls as ToolCall[]) {
+            const toolName = toolCall.function?.name;
+            const toolArgsStr = toolCall.function?.arguments || '{}';
+            
+            if (!toolName) continue;
+
+            this.log(`🔧 Tool call: ${toolName}`);
+
+            let toolResult: unknown;
+            let toolError: string | undefined;
+
+            try {
+              // Check if this is a local Rainfall tool
+              const localTool = this.findLocalTool(toolName, localToolMap);
+              
+              if (localTool) {
+                // Execute locally
+                this.log(`  → Executing locally`);
+                const args = JSON.parse(toolArgsStr);
+                toolResult = await this.executeLocalTool(localTool.id, args);
+              } else {
+                // Check if backend should handle it (has [priority:local] marker?)
+                const shouldExecuteLocal = body.tool_priority === 'local' || 
+                                           body.tool_priority === 'stacked';
+                
+                if (shouldExecuteLocal) {
+                  // Try to execute as a Rainfall tool even if not in our map
+                  // (might be a new tool or edge tool)
+                  try {
+                    const args = JSON.parse(toolArgsStr);
+                    toolResult = await this.rainfall!.executeTool(toolName.replace(/_/g, '-'), args);
+                  } catch {
+                    // Fall back to letting backend handle it
+                    toolResult = { _pending: true, tool: toolName, args: toolArgsStr };
+                  }
+                } else {
+                  // Let backend handle remote tools
+                  toolResult = { _pending: true, tool: toolName, args: toolArgsStr };
+                }
+              }
+            } catch (error) {
+              toolError = error instanceof Error ? error.message : String(error);
+              this.log(`  → Error: ${toolError}`);
+            }
+
+            // Add tool result to messages
+            messages.push({
+              role: 'tool',
+              content: toolError 
+                ? JSON.stringify({ error: toolError })
+                : typeof toolResult === 'string' 
+                  ? toolResult 
+                  : JSON.stringify(toolResult),
+              tool_call_id: toolCall.id,
+            });
+
+            // Record execution in context
+            if (this.context) {
+              this.context.recordExecution(
+                toolName,
+                JSON.parse(toolArgsStr || '{}'),
+                toolResult,
+                { error: toolError, duration: 0 }
+              );
+            }
+          }
+        }
+
+        // Max iterations reached - return current state
+        res.status(500).json({
+          error: {
+            message: 'Maximum tool execution iterations reached',
+            type: 'tool_execution_error',
+          },
+        });
+
+      } catch (error) {
+        this.log('Chat completions error:', error);
+        res.status(500).json({
+          error: {
+            message: error instanceof Error ? error.message : 'Internal server error',
+            type: 'internal_error',
+          },
+        });
+      }
+    });
+
+    // Health check endpoint
+    this.openaiApp.get('/health', (_req: Request, res: Response) => {
+      res.json({
+        status: 'ok',
+        daemon: 'rainfall',
+        version: '0.1.0',
+        tools_loaded: this.tools.length,
+        edge_node_id: this.networkedExecutor?.getEdgeNodeId(),
+        clients_connected: this.clients.size,
+      });
+    });
+
+    // Status endpoint with full daemon info
+    this.openaiApp.get('/status', (_req: Request, res: Response) => {
+      res.json(this.getStatus());
+    });
+
+    // Queue job endpoint for distributed execution
+    this.openaiApp.post('/v1/queue', async (req: Request, res: Response) => {
+      const { tool_id, params, execution_mode = 'any' } = req.body;
+
+      if (!tool_id) {
+        res.status(400).json({ error: 'Missing required field: tool_id' });
+        return;
+      }
+
+      if (!this.networkedExecutor) {
+        res.status(503).json({ error: 'Networked executor not available' });
+        return;
+      }
+
+      try {
+        const jobId = await this.networkedExecutor.queueToolExecution(
+          tool_id,
+          params || {},
+          { executionMode: execution_mode }
+        );
+        res.json({ job_id: jobId, status: 'queued' });
+      } catch (error) {
+        res.status(500).json({ 
+          error: error instanceof Error ? error.message : 'Failed to queue job' 
+        });
+      }
+    });
+
+    return new Promise((resolve) => {
+      this.openaiApp.listen(this.openaiPort, () => {
+        resolve();
+      });
+    });
+  }
+
+  /**
+   * Build a map of local Rainfall tools for quick lookup
+   * Maps OpenAI-style underscore names to Rainfall tool IDs
+   */
+  private async buildLocalToolMap(): Promise<Map<string, { id: string; name: string; description: string }>> {
+    const map = new Map<string, { id: string; name: string; description: string }>();
+    
+    for (const tool of this.tools) {
+      const openAiName = tool.id.replace(/-/g, '_');
+      map.set(openAiName, {
+        id: tool.id,
+        name: openAiName,
+        description: tool.description,
+      });
+      // Also map the original ID for exact matches
+      map.set(tool.id, {
+        id: tool.id,
+        name: openAiName,
+        description: tool.description,
+      });
+    }
+    
+    return map;
+  }
+
+  /**
+   * Find a local Rainfall tool by name (OpenAI underscore format or original)
+   */
+  private findLocalTool(
+    toolName: string, 
+    localToolMap: Map<string, { id: string; name: string; description: string }>
+  ): { id: string; name: string; description: string } | undefined {
+    // Try exact match first
+    if (localToolMap.has(toolName)) {
+      return localToolMap.get(toolName);
+    }
+    
+    // Try with underscores converted to dashes
+    const dashedName = toolName.replace(/_/g, '-');
+    if (localToolMap.has(dashedName)) {
+      return localToolMap.get(dashedName);
+    }
+    
+    return undefined;
+  }
+
+  /**
+   * Execute a local Rainfall tool
+   */
+  private async executeLocalTool(toolId: string, args: Record<string, unknown>): Promise<unknown> {
+    if (!this.rainfall) {
+      throw new Error('Rainfall SDK not initialized');
+    }
+
+    const startTime = Date.now();
+    try {
+      const result = await this.rainfall.executeTool(toolId, args);
+      const duration = Date.now() - startTime;
+      this.log(`  ✓ Completed in ${duration}ms`);
+      return result;
+    } catch (error) {
+      const duration = Date.now() - startTime;
+      this.log(`  ✗ Failed after ${duration}ms`);
+      throw error;
+    }
+  }
+
+  /**
+   * Parse XML-style tool calls from model output
+   * Handles formats like: <function=name><parameter=key>value</parameter></function>
+   */
+  private parseXMLToolCalls(content: string): ToolCall[] {
+    const toolCalls: ToolCall[] = [];
+
+    // Match <function=name>...</function> blocks
+    const functionRegex = /<function=([^>]+)>([\s\S]*?)<\/function>/gi;
+    let match;
+
+    while ((match = functionRegex.exec(content)) !== null) {
+      const functionName = match[1].trim();
+      const paramsBlock = match[2];
+
+      // Parse parameters: <parameter=key>value</parameter>
+      const params: Record<string, unknown> = {};
+      const paramRegex = /<parameter=([^>]+)>([\s\S]*?)<\/parameter>/gi;
+      let paramMatch;
+
+      while ((paramMatch = paramRegex.exec(paramsBlock)) !== null) {
+        const paramName = paramMatch[1].trim();
+        const paramValue = paramMatch[2].trim();
+        params[paramName] = paramValue;
+      }
+
+      // Create a tool call
+      toolCalls.push({
+        id: `xml-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
+        type: 'function',
+        function: {
+          name: functionName,
+          arguments: JSON.stringify(params),
+        },
+      });
+
+      this.log(`📋 Parsed XML tool call: ${functionName}(${JSON.stringify(params)})`);
+    }
+
+    return toolCalls;
+  }
+
+  /**
+   * Call the LLM via Rainfall backend, LM Studio, RunPod, or other providers
+   * 
+   * Provider priority:
+   * 1. Config file (llm.provider, llm.baseUrl)
+   * 2. Environment variables (OPENAI_API_KEY, OLLAMA_HOST, etc.)
+   * 3. Default to Rainfall (credits-based)
+   */
+  private async callLLM(params: LLMCallParams): Promise<LLMResponse> {
+    if (!this.rainfall) {
+      throw new Error('Rainfall SDK not initialized');
+    }
+
+    // Load config to determine provider
+    const { loadConfig, getProviderBaseUrl } = await import('../cli/config.js');
+    const config = loadConfig();
+    const provider = config.llm?.provider || 'rainfall';
+
+    // Route to appropriate provider
+    switch (provider) {
+      case 'local':
+      case 'ollama':
+        return this.callLocalLLM(params, config);
+      
+      case 'openai':
+      case 'anthropic':
+        // Use OpenAI/Anthropic API directly (OpenAI-compatible)
+        return this.callExternalLLM(params, config, provider);
+      
+      case 'rainfall':
+      default:
+        // Use Rainfall backend (credits-based)
+        return this.rainfall.chatCompletions({
+          subscriber_id: params.subscriberId,
+          model: params.model,
+          messages: params.messages as Array<{ role: string; content: string; name?: string }>,
+          stream: params.stream || false,
+          temperature: params.temperature,
+          max_tokens: params.max_tokens,
+          tools: params.tools,
+          tool_choice: params.tool_choice,
+          tool_priority: params.tool_priority,
+          enable_stacked: params.enable_stacked,
+        }) as Promise<{ choices?: Array<{ message?: { content?: string; tool_calls?: ToolCall[] } }> }>;
+    }
+  }
+
+  /**
+   * Call external LLM provider (OpenAI, Anthropic) via their OpenAI-compatible APIs
+   */
+  private async callExternalLLM(
+    params: LLMCallParams,
+    config: { llm?: { baseUrl?: string; apiKey?: string; model?: string } },
+    provider: 'openai' | 'anthropic'
+  ): Promise<LLMResponse> {
+    const { getProviderBaseUrl } = await import('../cli/config.js');
+    const baseUrl = config.llm?.baseUrl || getProviderBaseUrl({ llm: { provider: provider as 'openai' | 'anthropic' | 'ollama' | 'local' | 'rainfall' } });
+    const apiKey = config.llm?.apiKey;
+    
+    if (!apiKey) {
+      throw new Error(`${provider} API key not configured. Set via: rainfall config set llm.apiKey <key>`);
+    }
+
+    const model = params.model || config.llm?.model || (provider === 'anthropic' ? 'claude-3-5-sonnet-20241022' : 'gpt-4o');
+
+    const url = `${baseUrl}/chat/completions`;
+
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model,
+        messages: params.messages,
+        tools: params.tools,
+        tool_choice: params.tool_choice,
+        temperature: params.temperature,
+        max_tokens: params.max_tokens,
+        stream: false, // Tool loop requires non-streaming
+      }),
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      throw new Error(`${provider} API error: ${error}`);
+    }
+
+    return response.json() as Promise<LLMResponse>;
+  }
+
+  /**
+   * Call a local LLM (LM Studio, Ollama, etc.)
+   */
+  private async callLocalLLM(
+    params: LLMCallParams,
+    config: { llm?: { baseUrl?: string; apiKey?: string; model?: string } }
+  ): Promise<LLMResponse> {
+    const baseUrl = config.llm?.baseUrl || 'http://localhost:1234/v1';
+    const apiKey = config.llm?.apiKey || 'not-needed';
+    const model = params.model || config.llm?.model || 'local-model';
+
+    const url = `${baseUrl}/chat/completions`;
+
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model,
+        messages: params.messages,
+        tools: params.tools,
+        tool_choice: params.tool_choice,
+        temperature: params.temperature,
+        max_tokens: params.max_tokens,
+        stream: false, // Tool loop requires non-streaming
+      }),
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      throw new Error(`Local LLM error: ${error}`);
+    }
+
+    return response.json() as Promise<LLMResponse>;
+  }
+
+  /**
+   * Stream a response to the client (converts non-streaming to SSE format)
+   */
+  private async streamResponse(res: Response, response: LLMResponse): Promise<void> {
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+
+    const message = response.choices?.[0]?.message;
+    const id = response.id || `chatcmpl-${Date.now()}`;
+    const model = response.model || 'unknown';
+    const created = Math.floor(Date.now() / 1000);
+
+    // Send role chunk
+    res.write(`data: ${JSON.stringify({
+      id,
+      object: 'chat.completion.chunk',
+      created,
+      model,
+      choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }],
+    })}\n\n`);
+
+    // Send content in chunks (simulate streaming)
+    const content = message?.content || '';
+    const chunkSize = 10;
+    for (let i = 0; i < content.length; i += chunkSize) {
+      const chunk = content.slice(i, i + chunkSize);
+      res.write(`data: ${JSON.stringify({
+        id,
+        object: 'chat.completion.chunk',
+        created,
+        model,
+        choices: [{ index: 0, delta: { content: chunk }, finish_reason: null }],
+      })}\n\n`);
+    }
+
+    // Send finish
+    res.write(`data: ${JSON.stringify({
+      id,
+      object: 'chat.completion.chunk',
+      created,
+      model,
+      choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+    })}\n\n`);
+
+    res.write('data: [DONE]\n\n');
+    res.end();
+  }
+
+  /**
+   * Update context with conversation history
+   */
+  private updateContext(
+    originalMessages: ChatCompletionMessage[],
+    response: { choices?: Array<{ message?: { content?: string } }> }
+  ): void {
+    if (!this.context) return;
+
+    // Add last user message
+    const lastUserMessage = originalMessages.filter(m => m.role === 'user').pop();
+    if (lastUserMessage) {
+      this.context.addMessage('user', lastUserMessage.content);
+    }
+
+    // Add assistant response
+    const assistantContent = response.choices?.[0]?.message?.content;
+    if (assistantContent) {
+      this.context.addMessage('assistant', assistantContent);
+    }
+  }
+
+  private async getOpenAITools(): Promise<ToolDefinition[]> {
+    const tools: ToolDefinition[] = [];
+
+    for (const tool of this.tools.slice(0, 128)) { // Limit to first 128 tools
+      const schema = await this.getToolSchema(tool.id);
+      if (schema) {
+        const toolSchema = schema as {
+          name?: string;
+          description?: string;
+          parameters?: Record<string, unknown>;
+        };
+
+        // Ensure parameters have the correct OpenAI format with all required fields
+        let parameters: Record<string, unknown> = { type: 'object', properties: {}, required: [] };
+
+        if (toolSchema.parameters && typeof toolSchema.parameters === 'object') {
+          const rawParams = toolSchema.parameters as Record<string, unknown>;
+          parameters = {
+            type: rawParams.type || 'object',
+            properties: rawParams.properties || {},
+            required: rawParams.required || [],
+          };
+        }
+
+        tools.push({
+          type: 'function',
+          function: {
+            name: tool.id.replace(/-/g, '_'), // OpenAI requires underscore names
+            description: toolSchema.description || tool.description,
+            parameters,
+          },
+        });
+      }
+    }
+
+    return tools;
+  }
+
+  private buildResponseContent(): string {
+    const edgeNodeId = this.networkedExecutor?.getEdgeNodeId();
+    const toolCount = this.tools.length;
+    
+    return `Rainfall daemon online. Edge node: ${edgeNodeId || 'local'}. ${toolCount} tools available. What would you like to execute locally or in the cloud?`;
+  }
+
+  getStatus(): DaemonStatus {
+    return {
+      running: !!this.wss,
+      port: this.port,
+      openaiPort: this.openaiPort,
+      toolsLoaded: this.tools.length,
+      clientsConnected: this.clients.size,
+      edgeNodeId: this.networkedExecutor?.getEdgeNodeId(),
+      context: this.context?.getStatus() || {
+        memoriesCached: 0,
+        activeSessions: 0,
+        executionHistorySize: 0,
+      },
+      listeners: this.listeners?.getStatus() || {
+        fileWatchers: 0,
+        cronTriggers: 0,
+        recentEvents: 0,
+      },
+    };
+  }
+
+  private log(...args: unknown[]): void {
+    if (this.debug) {
+      console.log(...args);
+    }
+  }
+}
+
+// Singleton instance for CLI usage
+let daemonInstance: RainfallDaemon | null = null;
+
+export async function startDaemon(config: DaemonConfig = {}): Promise<RainfallDaemon> {
+  if (daemonInstance) {
+    console.log('Daemon already running');
+    return daemonInstance;
+  }
+
+  daemonInstance = new RainfallDaemon(config);
+  await daemonInstance.start();
+  return daemonInstance;
+}
+
+export async function stopDaemon(): Promise<void> {
+  if (!daemonInstance) {
+    console.log('Daemon not running');
+    return;
+  }
+
+  await daemonInstance.stop();
+  daemonInstance = null;
+}
+
+export function getDaemonStatus(): DaemonStatus | null {
+  if (!daemonInstance) {
+    return null;
+  }
+  return daemonInstance.getStatus();
+}
+
+export function getDaemonInstance(): RainfallDaemon | null {
+  return daemonInstance;
+}
