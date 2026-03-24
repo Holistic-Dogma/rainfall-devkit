@@ -1,6 +1,6 @@
 {
   "name": "@rainfall-devkit/sdk",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "Official SDK for Rainfall API - 200+ tools for building AI-powered applications",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
