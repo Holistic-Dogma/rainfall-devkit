@@ -101,9 +101,9 @@ async function authLogin(args: string[]): Promise<void> {
     const me = await rainfall.getMe();
     
     saveConfig({ apiKey });
-    console.log(`✓ Authenticated as ${me.email}`);
-    console.log(`  Plan: ${me.plan}`);
-    console.log(`  Usage: ${me.usage.callsThisMonth.toLocaleString()} / ${me.usage.callsLimit.toLocaleString()} calls this month`);
+    console.log(`✓ Authenticated as ${me.name || me.email || 'Unknown'}`);
+    console.log(`  Plan: ${me.billingStatus || me.plan || 'N/A'}`);
+    console.log(`  Usage: ${me.usage?.callsThisMonth?.toLocaleString() || 0} / ${me.usage?.callsLimit?.toLocaleString() || 'Unlimited'} calls this month`);
   } catch (error) {
     console.error('Error: Invalid API key');
     process.exit(1);
@@ -127,9 +127,9 @@ async function authStatus(): Promise<void> {
   try {
     const rainfall = new Rainfall({ apiKey: config.apiKey });
     const me = await rainfall.getMe();
-    console.log(`Authenticated as ${me.email}`);
-    console.log(`Plan: ${me.plan}`);
-    console.log(`Usage: ${me.usage.callsThisMonth.toLocaleString()} / ${me.usage.callsLimit.toLocaleString()} calls this month`);
+    console.log(`Authenticated as ${me.name || me.email || 'Unknown'}`);
+    console.log(`Plan: ${me.billingStatus || me.plan || 'N/A'}`);
+    console.log(`Usage: ${me.usage?.callsThisMonth?.toLocaleString() || 0} / ${me.usage?.callsLimit?.toLocaleString() || 'Unlimited'} calls this month`);
   } catch (error) {
     console.log('Authentication expired or invalid');
     console.log('Run: rainfall auth login <api-key>');

@@ -22,6 +22,7 @@ export class RainfallClient {
   private readonly defaultRetries: number;
   private readonly defaultRetryDelay: number;
   private lastRateLimitInfo?: RateLimitInfo;
+  private subscriberId?: string;
 
   constructor(config: RainfallConfig) {
     this.apiKey = config.apiKey;
@@ -67,7 +68,7 @@ export class RainfallClient {
         const response = await fetch(url, {
           method,
           headers: {
-            'Authorization': `Bearer ${this.apiKey}`,
+            'x-api-key': this.apiKey,
             'Content-Type': 'application/json',
             'Accept': 'application/json',
             'X-Rainfall-SDK-Version': '0.1.0',
@@ -151,7 +152,8 @@ export class RainfallClient {
     params?: Record<string, unknown>,
     options?: RequestOptions
   ): Promise<T> {
-    return this.request<T>(`/tools/${toolId}`, {
+    const subscriberId = await this.ensureSubscriberId();
+    return this.request<T>(`/olympic/subscribers/${subscriberId}/nodes/${toolId}`, {
       method: 'POST',
       body: params,
     }, options);
@@ -161,14 +163,29 @@ export class RainfallClient {
    * List all available tools
    */
   async listTools(): Promise<Array<{ id: string; name: string; description: string; category: string }>> {
-    return this.request('/tools');
+    const subscriberId = await this.ensureSubscriberId();
+    const result = await this.request<{ keys?: string[]; nodes?: Array<{ id: string; name: string; description: string; category: string }> }>(`/olympic/subscribers/${subscriberId}/nodes/_utils/node-list`);
+    
+    // API returns { keys: [...] } with tool IDs, map to expected format
+    if (result.keys && Array.isArray(result.keys)) {
+      return result.keys.map(key => ({
+        id: key,
+        name: key,
+        description: '',
+        category: 'general',
+      }));
+    }
+    
+    // Fallback to nodes format if that's what the API returns
+    return result.nodes || [];
   }
 
   /**
    * Get tool schema/parameters
    */
   async getToolSchema(toolId: string): Promise<ToolSchema> {
-    return this.request(`/tools/${toolId}/schema`);
+    const subscriberId = await this.ensureSubscriberId();
+    return this.request(`/olympic/subscribers/${subscriberId}/nodes/${toolId}/params`);
   }
 
   /**
@@ -176,14 +193,56 @@ export class RainfallClient {
    */
   async getMe(): Promise<{
     id: string;
-    email: string;
-    plan: string;
+    name: string;
+    email?: string;
+    plan?: string;
+    billingStatus?: string;
     usage: {
       callsThisMonth: number;
       callsLimit: number;
     };
   }> {
-    return this.request('/me');
+    const result = await this.request<{ success: boolean; subscriber: { 
+      id: string; 
+      name: string;
+      google_id?: string;
+      billing_status?: string;
+      metadata?: { usage?: { callsThisMonth?: number; callsLimit?: number } };
+    } }>('/olympic/subscribers/me');
+    
+    // Store subscriber ID for subsequent calls
+    if (result.subscriber?.id) {
+      this.subscriberId = result.subscriber.id;
+    }
+    
+    // Normalize the response to match expected format
+    const subscriber = result.subscriber;
+    return {
+      id: subscriber.id,
+      name: subscriber.name,
+      email: subscriber.google_id,
+      billingStatus: subscriber.billing_status,
+      plan: subscriber.billing_status,
+      usage: {
+        callsThisMonth: subscriber.metadata?.usage?.callsThisMonth ?? 0,
+        callsLimit: subscriber.metadata?.usage?.callsLimit ?? 5000,
+      },
+    };
+  }
+
+  /**
+   * Ensure we have a subscriber ID, fetching it if necessary
+   */
+  private async ensureSubscriberId(): Promise<string> {
+    if (this.subscriberId) {
+      return this.subscriberId;
+    }
+    
+    const me = await this.getMe();
+    if (!me.id) {
+      throw new RainfallError('Failed to get subscriber ID', 'NO_SUBSCRIBER_ID');
+    }
+    return me.id;
   }
 
   private sleep(ms: number): Promise<void> {
