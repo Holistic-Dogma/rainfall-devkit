@@ -164,11 +164,19 @@ export class RainfallClient {
    */
   async listTools(): Promise<Array<{ id: string; name: string; description: string; category: string }>> {
     const subscriberId = await this.ensureSubscriberId();
-    const result = await this.request<{ keys?: string[]; nodes?: Array<{ id: string; name: string; description: string; category: string }> }>(`/olympic/subscribers/${subscriberId}/nodes/_utils/node-list`);
     
-    // API returns { keys: [...] } with tool IDs, map to expected format
-    if (result.keys && Array.isArray(result.keys)) {
-      return result.keys.map(key => ({
+    // Use bulk endpoint for efficiency
+    const result = await this.request<{ success: boolean; nodes?: Record<string, { id: string; name: string; description: string; category: string }> }>(`/olympic/subscribers/${subscriberId}/nodes/_utils/node-descriptions`);
+    
+    if (result.success && result.nodes) {
+      return Object.values(result.nodes);
+    }
+    
+    // Fallback to legacy endpoint
+    const legacyResult = await this.request<{ keys?: string[]; nodes?: Array<{ id: string; name: string; description: string; category: string }> }>(`/olympic/subscribers/${subscriberId}/nodes/_utils/node-list`);
+    
+    if (legacyResult.keys && Array.isArray(legacyResult.keys)) {
+      return legacyResult.keys.map(key => ({
         id: key,
         name: key,
         description: '',
@@ -176,8 +184,7 @@ export class RainfallClient {
       }));
     }
     
-    // Fallback to nodes format if that's what the API returns
-    return result.nodes || [];
+    return legacyResult.nodes || [];
   }
 
   /**
@@ -185,7 +192,8 @@ export class RainfallClient {
    */
   async getToolSchema(toolId: string): Promise<ToolSchema> {
     const subscriberId = await this.ensureSubscriberId();
-    return this.request(`/olympic/subscribers/${subscriberId}/nodes/${toolId}/params`);
+    const response = await this.request<{ success: boolean; params: ToolSchema }>(`/olympic/subscribers/${subscriberId}/nodes/${toolId}/params`);
+    return response.params;
   }
 
   /**

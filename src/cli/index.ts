@@ -161,6 +161,46 @@ async function listTools(): Promise<void> {
   }
 }
 
+interface SchemaProperty {
+  type?: string;
+  description?: string;
+  optional?: boolean;
+  items?: SchemaProperty;
+  properties?: Record<string, SchemaProperty>;
+}
+
+function formatSchema(obj: unknown, indent = 0): string {
+  if (!obj || typeof obj !== 'object') return String(obj);
+  
+  const lines: string[] = [];
+  const pad = '  '.repeat(indent);
+  
+  for (const [key, value] of Object.entries(obj)) {
+    if (value && typeof value === 'object') {
+      const prop = value as SchemaProperty;
+      const type = prop.type || 'object';
+      const optional = prop.optional ? ' (optional)' : '';
+      const desc = prop.description ? ` - ${prop.description}` : '';
+      
+      lines.push(`${pad}• ${key}${optional}: ${type}${desc}`);
+      
+      // Recurse into nested properties
+      if (prop.properties) {
+        lines.push(formatSchema(prop.properties, indent + 1));
+      }
+      // Show array item structure
+      if (prop.items && prop.items.properties) {
+        lines.push(`${pad}  items:`);
+        lines.push(formatSchema(prop.items.properties, indent + 2));
+      }
+    } else {
+      lines.push(`${pad}• ${key}: ${value}`);
+    }
+  }
+  
+  return lines.join('\n');
+}
+
 async function describeTool(args: string[]): Promise<void> {
   const toolId = args[0];
   
@@ -174,13 +214,26 @@ async function describeTool(args: string[]): Promise<void> {
   
   try {
     const schema = await rainfall.getToolSchema(toolId);
-    console.log(`Tool: ${schema.name}`);
-    console.log(`Description: ${schema.description}`);
-    console.log(`Category: ${schema.category}`);
-    console.log(`\nParameters:`);
-    console.log(JSON.stringify(schema.parameters, null, 2));
-    console.log(`\nOutput:`);
-    console.log(JSON.stringify(schema.output, null, 2));
+    console.log(`\n  ${schema.name}`);
+    console.log(`  ${'─'.repeat(Math.max(schema.name.length, 40))}`);
+    console.log(`\n  Description:`);
+    console.log(`    ${schema.description.split('\n').join('\n    ')}`);
+    console.log(`\n  Category: ${schema.category}`);
+    
+    console.log(`\n  Parameters:`);
+    if (schema.parameters && typeof schema.parameters === 'object' && Object.keys(schema.parameters).length > 0) {
+      console.log(formatSchema(schema.parameters, 2));
+    } else {
+      console.log('    None');
+    }
+    
+    console.log(`\n  Output:`);
+    if (schema.output && typeof schema.output === 'object' && Object.keys(schema.output).length > 0) {
+      console.log(formatSchema(schema.output, 2));
+    } else {
+      console.log('    None');
+    }
+    console.log();
   } catch (error) {
     console.error(`Error: Tool '${toolId}' not found`);
     process.exit(1);
