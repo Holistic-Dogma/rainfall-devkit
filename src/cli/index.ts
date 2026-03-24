@@ -4,8 +4,11 @@
  */
 
 import { readFileSync, existsSync } from 'fs';
+import { join, dirname } from 'path';
+import { fileURLToPath } from 'url';
 import { Rainfall } from '../sdk.js';
 import { loadConfig, saveConfig } from './config.js';
+import { spawn } from 'child_process';
 
 function printHelp(): void {
   console.log(`
@@ -39,6 +42,9 @@ Commands:
   config set <key> <value>      Set configuration value
   config llm                    Show LLM configuration
   
+  version                       Show version information
+  upgrade                       Upgrade to the latest version
+  
   help                          Show this help message
 
 Configuration keys:
@@ -51,6 +57,7 @@ Options for 'run':
   --params, -p <json>           Tool parameters as JSON
   --file, -f <path>             Read parameters from file
   --raw                         Output raw JSON
+  --<key> <value>               Pass individual parameters (e.g., --query "AI news")
 
 Options for 'daemon start':
   --port <port>                 WebSocket port (default: 8765)
@@ -62,6 +69,8 @@ Examples:
   rainfall tools list
   rainfall tools describe github-create-issue
   rainfall run exa-web-search -p '{"query": "AI news"}'
+  rainfall run exa-web-search --query "AI news"
+  rainfall run github-create-issue --owner facebook --repo react --title "Bug"
   rainfall run article-summarize -f ./article.json
   rainfall daemon start
   echo '{"query": "hello"}' | rainfall run exa-web-search
@@ -284,10 +293,13 @@ Options:
   -p, --params <json>    Tool parameters as JSON string
   -f, --file <path>      Read parameters from JSON file
   --raw                  Output raw JSON (no formatting)
+  --<key> <value>        Pass individual parameters (e.g., --query "AI news")
 
 Examples:
   rainfall run figma-users-getMe
   rainfall run exa-web-search -p '{"query": "AI news"}'
+  rainfall run exa-web-search --query "AI news"
+  rainfall run github-create-issue --owner facebook --repo react --title "Bug"
   rainfall run github-create-issue -f ./issue.json
   echo '{"query": "hello"}' | rainfall run exa-web-search
 `);
@@ -295,6 +307,7 @@ Examples:
   }
 
   let params: Record<string, unknown> = {};
+  const rawArgs: string[] = [];
 
   // Parse options
   for (let i = 1; i < args.length; i++) {
@@ -326,6 +339,23 @@ Examples:
       }
     } else if (arg === '--raw') {
       // Output format flag, handled later
+    } else if (arg.startsWith('--')) {
+      // Handle --key value style arguments
+      const key = arg.slice(2); // Remove '--'
+      const value = args[++i];
+      if (value === undefined) {
+        console.error(`Error: ${arg} requires a value`);
+        process.exit(1);
+      }
+      // Try to parse as JSON, fallback to string
+      try {
+        params[key] = JSON.parse(value);
+      } catch {
+        params[key] = value;
+      }
+    } else {
+      // Collect positional arguments
+      rawArgs.push(arg);
     }
   }
 
@@ -377,6 +407,26 @@ Examples:
   }
 
   const rainfall = getRainfall();
+
+  // If we have a single positional argument and no explicit params, 
+  // try to use it as the value for a single-parameter tool
+  if (rawArgs.length === 1 && Object.keys(params).length === 0) {
+    try {
+      const schema = await rainfall.getToolSchema(toolId);
+      if (schema.parameters && typeof schema.parameters === 'object') {
+        const paramEntries = Object.entries(schema.parameters as Record<string, { optional?: boolean }>);
+        const requiredParams = paramEntries.filter(([, p]) => !p.optional);
+        
+        // If there's only one required parameter, use the positional arg as its value
+        if (requiredParams.length === 1) {
+          const [paramName] = requiredParams[0];
+          params = { [paramName]: rawArgs[0] };
+        }
+      }
+    } catch {
+      // If we can't fetch the schema, just proceed without the positional arg
+    }
+  }
   
   try {
     const result = await rainfall.executeTool(toolId, params);
@@ -482,6 +532,71 @@ function configLLM(): void {
   console.log('  rainfall config set llm.baseUrl http://localhost:1234/v1');
   console.log('  rainfall config set llm.provider openai');
   console.log('  rainfall config set llm.apiKey sk-...');
+}
+
+// Version and upgrade commands
+function getPackageJson(): { version: string; name: string } {
+  try {
+    // Try to find package.json from the CLI location
+    const __filename = fileURLToPath(import.meta.url);
+    const __dirname = dirname(__filename);
+    const packagePath = join(__dirname, '..', '..', 'package.json');
+    const content = readFileSync(packagePath, 'utf8');
+    return JSON.parse(content);
+  } catch {
+    // Fallback if we can't read package.json
+    return { version: 'unknown', name: '@rainfall-devkit/sdk' };
+  }
+}
+
+function showVersion(): void {
+  const pkg = getPackageJson();
+  console.log(`${pkg.name} v${pkg.version}`);
+}
+
+async function upgrade(): Promise<void> {
+  const pkg = getPackageJson();
+  console.log(`Upgrading ${pkg.name}...`);
+  
+  // Detect package manager based on how the CLI was invoked
+  const execPath = process.argv[0];
+  const isBun = execPath.includes('bun');
+  
+  let command: string;
+  let args: string[];
+  
+  if (isBun) {
+    command = 'bun';
+    args = ['add', '-g', `${pkg.name}@latest`];
+  } else {
+    // Default to npm
+    command = 'npm';
+    args = ['i', '-g', `${pkg.name}@latest`];
+  }
+  
+  console.log(`Running: ${command} ${args.join(' ')}`);
+  console.log();
+  
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      stdio: 'inherit',
+      shell: true,
+    });
+    
+    child.on('close', (code) => {
+      if (code === 0) {
+        console.log();
+        console.log('✓ Upgrade complete');
+        resolve();
+      } else {
+        reject(new Error(`Upgrade failed with exit code ${code}`));
+      }
+    });
+    
+    child.on('error', (err) => {
+      reject(err);
+    });
+  });
 }
 
 // Daemon commands
@@ -745,6 +860,16 @@ async function main(): Promise<void> {
           console.error('\nUsage: rainfall config <get|set|llm>');
           process.exit(1);
       }
+      break;
+
+    case 'version':
+    case '--version':
+    case '-v':
+      showVersion();
+      break;
+
+    case 'upgrade':
+      await upgrade();
       break;
 
     case 'help':
