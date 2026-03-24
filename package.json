@@ -67,6 +67,6 @@
     "node": ">=18"
   },
   "dependencies": {
-    "@rainfall-devkit/sdk": "^0.1.5"
+    "@rainfall-devkit/sdk": "^0.1.7"
   }
 }

@@ -5,7 +5,7 @@
     "": {
       "name": "@rainfall/sdk",
       "dependencies": {
-        "@rainfall-devkit/sdk": "^0.1.5",
+        "@rainfall-devkit/sdk": "^0.1.7",
       },
       "devDependencies": {
         "@types/bun": "latest",
@@ -76,7 +76,7 @@
 
     "@jridgewell/trace-mapping": ["@jridgewell/trace-mapping@0.3.31", "", { "dependencies": { "@jridgewell/resolve-uri": "^3.1.0", "@jridgewell/sourcemap-codec": "^1.4.14" } }, "sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw=="],
 
-    "@rainfall-devkit/sdk": ["@rainfall-devkit/sdk@0.1.5", "", { "bin": { "rainfall": "dist/cli/index.js" } }, "sha512-gDpoyCj7qiT5Kib6uTPGhKLQDhQt+IFL4jHplShQhR+yqEg/Qb1VvUCcNT1zTg6pNOD+YrUvwwWsDgCSXuFX+A=="],
+    "@rainfall-devkit/sdk": ["@rainfall-devkit/sdk@0.1.7", "", { "dependencies": { "@rainfall-devkit/sdk": "^0.1.5" }, "bin": { "rainfall": "dist/cli/index.js" } }, "sha512-omnV7gGjiZAcUpCkEJuhLVJNy8Bh6gJvnPF4USVJbCiQ4/DnysIL93+dp0QfvOqUvyEfTmGpd61tpN5MJHWNGA=="],
 
     "@rollup/rollup-android-arm-eabi": ["@rollup/rollup-android-arm-eabi@4.59.0", "", { "os": "android", "cpu": "arm" }, "sha512-upnNBkA6ZH2VKGcBj9Fyl9IGNPULcjXRlg0LLeaioQWueH30p6IXtJEbKAgvyv+mJaMxSm1l6xwDXYjpEMiLMg=="],
 

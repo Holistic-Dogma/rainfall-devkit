@@ -153,10 +153,11 @@ export class RainfallClient {
     options?: RequestOptions
   ): Promise<T> {
     const subscriberId = await this.ensureSubscriberId();
-    return this.request<T>(`/olympic/subscribers/${subscriberId}/nodes/${toolId}`, {
+    const response = await this.request<{ success: boolean; result: T }>(`/olympic/subscribers/${subscriberId}/nodes/${toolId}`, {
       method: 'POST',
-      body: params,
+      body: params || {},
     }, options);
+    return response.result;
   }
 
   /**

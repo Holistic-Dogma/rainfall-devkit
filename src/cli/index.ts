@@ -279,6 +279,27 @@ async function runTool(args: string[]): Promise<void> {
     process.exit(1);
   }
 
+  // Check for help flag
+  if (toolId === '--help' || toolId === '-h') {
+    console.log(`
+Usage: rainfall run <tool-id> [options]
+
+Execute a tool by ID.
+
+Options:
+  -p, --params <json>    Tool parameters as JSON string
+  -f, --file <path>      Read parameters from JSON file
+  --raw                  Output raw JSON (no formatting)
+
+Examples:
+  rainfall run figma-users-getMe
+  rainfall run exa-web-search -p '{"query": "AI news"}'
+  rainfall run github-create-issue -f ./issue.json
+  echo '{"query": "hello"}' | rainfall run exa-web-search
+`);
+    return;
+  }
+
   let params: Record<string, unknown> = {};
 
   // Parse options
@@ -314,19 +335,50 @@ async function runTool(args: string[]): Promise<void> {
     }
   }
 
-  // Check for piped input
+  // Check for piped input (only if stdin is not a TTY)
+  // We use a non-blocking approach to avoid hanging when there's no piped input
   if (!process.stdin.isTTY) {
-    const chunks: Buffer[] = [];
-    for await (const chunk of process.stdin) {
-      chunks.push(chunk);
-    }
-    if (chunks.length > 0) {
-      try {
-        const piped = JSON.parse(Buffer.concat(chunks).toString());
-        params = { ...params, ...piped };
-      } catch {
-        // Ignore invalid piped JSON
+    // Pause stdin to prevent it from keeping the process alive
+    process.stdin.pause();
+    
+    // Check if there's any data available
+    const fs = await import('fs');
+    try {
+      // Use fs.read with a timeout to check for data
+      const buffer = Buffer.alloc(1024);
+      const bytesRead = await new Promise<number>((resolve) => {
+        const timeout = setTimeout(() => resolve(0), 50);
+        fs.read(process.stdin.fd, buffer, 0, 1024, null, (err, n) => {
+          clearTimeout(timeout);
+          resolve(err ? 0 : n);
+        });
+      });
+      
+      if (bytesRead > 0) {
+        let data = buffer.toString('utf8', 0, bytesRead);
+        
+        // Try to read more if available
+        while (true) {
+          const more = await new Promise<number>((resolve) => {
+            fs.read(process.stdin.fd, buffer, 0, 1024, null, (err, n) => {
+              resolve(err ? 0 : n);
+            });
+          });
+          if (more === 0) break;
+          data += buffer.toString('utf8', 0, more);
+        }
+        
+        if (data.trim()) {
+          try {
+            const piped = JSON.parse(data);
+            params = { ...params, ...piped };
+          } catch {
+            // Ignore invalid piped JSON
+          }
+        }
       }
+    } catch {
+      // Error reading stdin - ignore
     }
   }
 
@@ -429,7 +481,7 @@ async function main(): Promise<void> {
       break;
 
     case 'run':
-      await runTool(rest);
+      await runTool(args.slice(1));
       break;
 
     case 'me':
