@@ -245,9 +245,45 @@ export class Rainfall {
 
   /**
    * Execute any tool by ID (low-level access)
+   * 
+   * @param toolId - The ID of the tool to execute
+   * @param params - Parameters to pass to the tool
+   * @param options - Execution options including skipValidation to bypass param validation
+   * 
+   * @example
+   * ```typescript
+   * // Execute with validation (default)
+   * const result = await rainfall.executeTool('finviz-quotes', { tickers: ['AAPL'] });
+   * 
+   * // Execute without validation
+   * const result = await rainfall.executeTool('finviz-quotes', { tickers: ['AAPL'] }, { skipValidation: true });
+   * ```
    */
-  async executeTool<T = unknown>(toolId: string, params?: Record<string, unknown>) {
-    return this.client.executeTool<T>(toolId, params);
+  async executeTool<T = unknown>(
+    toolId: string, 
+    params?: Record<string, unknown>,
+    options?: { skipValidation?: boolean; timeout?: number; retries?: number; retryDelay?: number }
+  ) {
+    return this.client.executeTool<T>(toolId, params, options);
+  }
+
+  /**
+   * Validate parameters for a tool without executing it
+   * 
+   * @param toolId - The ID of the tool to validate params for
+   * @param params - Parameters to validate
+   * @returns Validation result with detailed error information
+   * 
+   * @example
+   * ```typescript
+   * const result = await rainfall.validateToolParams('finviz-quotes', { tickers: ['AAPL'] });
+   * if (!result.valid) {
+   *   console.log('Validation errors:', result.errors);
+   * }
+   * ```
+   */
+  async validateToolParams(toolId: string, params?: Record<string, unknown>) {
+    return this.client.validateToolParams(toolId, params);
   }
 
   /**

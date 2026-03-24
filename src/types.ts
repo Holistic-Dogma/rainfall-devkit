@@ -8,6 +8,8 @@ export interface RainfallConfig {
   timeout?: number;
   retries?: number;
   retryDelay?: number;
+  /** Disable parameter validation before tool execution (default: false) */
+  disableValidation?: boolean;
   /** Pre-configured MCP clients to connect on daemon startup */
   mcpClients?: import('./services/mcp-proxy.js').MCPClientConfig[];
 }

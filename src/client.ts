@@ -9,6 +9,13 @@ import {
   NetworkError,
   parseErrorResponse,
 } from './errors.js';
+import { 
+  fetchToolSchema, 
+  validateParams, 
+  formatValidationErrors,
+  type ToolParamsSchema,
+  type ValidationResult 
+} from './validation.js';
 
 const DEFAULT_BASE_URL = 'https://olympic-api.pragma-digital.org/v1';
 const DEFAULT_TIMEOUT = 30000;
@@ -21,6 +28,7 @@ export class RainfallClient {
   private readonly defaultTimeout: number;
   private readonly defaultRetries: number;
   private readonly defaultRetryDelay: number;
+  private readonly disableValidation: boolean;
   private lastRateLimitInfo?: RateLimitInfo;
   private subscriberId?: string;
 
@@ -30,6 +38,7 @@ export class RainfallClient {
     this.defaultTimeout = config.timeout || DEFAULT_TIMEOUT;
     this.defaultRetries = config.retries ?? DEFAULT_RETRIES;
     this.defaultRetryDelay = config.retryDelay || DEFAULT_RETRY_DELAY;
+    this.disableValidation = config.disableValidation ?? false;
   }
 
   /**
@@ -146,18 +155,84 @@ export class RainfallClient {
 
   /**
    * Execute a tool/node by ID
+   * 
+   * @param toolId - The ID of the tool/node to execute
+   * @param params - Parameters to pass to the tool
+   * @param options - Request options including skipValidation to bypass param validation
    */
   async executeTool<T = unknown>(
     toolId: string,
     params?: Record<string, unknown>,
-    options?: RequestOptions
+    options?: RequestOptions & { skipValidation?: boolean }
   ): Promise<T> {
+    // Validate params before execution (unless skipped globally or per-call)
+    if (!this.disableValidation && !options?.skipValidation) {
+      const validation = await this.validateToolParams(toolId, params);
+      if (!validation.valid) {
+        const { ValidationError } = await import('./errors.js');
+        throw new ValidationError(
+          `Parameter validation failed for tool '${toolId}': ${formatValidationErrors(validation)}`,
+          { toolId, errors: validation.errors }
+        );
+      }
+    }
+
     const subscriberId = await this.ensureSubscriberId();
-    const response = await this.request<{ success: boolean; result: T }>(`/olympic/subscribers/${subscriberId}/nodes/${toolId}`, {
+    const response = await this.request<{ success: boolean; result: T; error?: string | unknown }>(`/olympic/subscribers/${subscriberId}/nodes/${toolId}`, {
       method: 'POST',
       body: params || {},
     }, options);
+    
+    // Check if the API returned success: false
+    if (response.success === false) {
+      const errorMessage = typeof response.error === 'string' 
+        ? response.error 
+        : JSON.stringify(response.error);
+      throw new RainfallError(
+        `Tool execution failed: ${errorMessage}`,
+        'TOOL_EXECUTION_ERROR',
+        400,
+        { toolId, error: response.error }
+      );
+    }
+    
     return response.result;
+  }
+
+  /**
+   * Validate parameters for a tool without executing it
+   * Fetches the tool schema and validates the provided params
+   * 
+   * @param toolId - The ID of the tool to validate params for
+   * @param params - Parameters to validate
+   * @returns Validation result with detailed error information
+   * 
+   * @example
+   * ```typescript
+   * const result = await client.validateToolParams('finviz-quotes', { tickers: ['AAPL'] });
+   * if (!result.valid) {
+   *   console.log('Validation errors:', result.errors);
+   * }
+   * ```
+   */
+  async validateToolParams(
+    toolId: string,
+    params?: Record<string, unknown>
+  ): Promise<ValidationResult> {
+    try {
+      const schema = await fetchToolSchema(this, toolId);
+      return validateParams(schema, params, toolId);
+    } catch (error) {
+      // If we can't fetch the schema, return an error
+      if (error instanceof RainfallError && error.statusCode === 404) {
+        return {
+          valid: false,
+          errors: [{ path: toolId, message: `Tool '${toolId}' not found` }],
+        };
+      }
+      // For other errors, assume valid and let the API handle it
+      return { valid: true, errors: [] };
+    }
   }
 
   /**
@@ -190,11 +265,20 @@ export class RainfallClient {
 
   /**
    * Get tool schema/parameters
+   * 
+   * @param toolId - The ID of the tool to get schema for
+   * @returns Tool schema including parameters and output definitions
    */
   async getToolSchema(toolId: string): Promise<ToolSchema> {
-    const subscriberId = await this.ensureSubscriberId();
-    const response = await this.request<{ success: boolean; params: ToolSchema }>(`/olympic/subscribers/${subscriberId}/nodes/${toolId}/params`);
-    return response.params;
+    const schema = await fetchToolSchema(this, toolId);
+    return {
+      name: schema.name,
+      description: schema.description,
+      category: schema.category,
+      parameters: schema.parameters,
+      output: schema.output,
+      metadata: schema.metadata || {},
+    };
   }
 
   /**

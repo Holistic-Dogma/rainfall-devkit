@@ -49,6 +49,18 @@ export type {
   ToolSchema,
 } from './types.js';
 
+// Validation exports
+export {
+  fetchToolSchema,
+  validateParams,
+  formatValidationErrors,
+  clearSchemaCache,
+  type ParamSchema,
+  type ToolParamsSchema,
+  type ValidationResult,
+  type ValidationIssue,
+} from './validation.js';
+
 // Namespace types
 export type {
   Integrations,
@@ -106,3 +118,17 @@ export {
   type JobResult,
   type SecureEdgeConfig,
 } from './security/index.js';
+
+// CLI extension exports (for custom tool handlers)
+export type {
+  ToolContext,
+  PreflightResult,
+  PostflightContext,
+  DisplayContext,
+  ToolHandler,
+  ToolHandlerRegistry,
+} from './cli/core/types.js';
+
+export {
+  globalHandlerRegistry,
+} from './cli/handlers/_registry.js';

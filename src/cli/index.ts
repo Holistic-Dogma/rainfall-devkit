@@ -10,6 +10,10 @@ import { Rainfall } from '../sdk.js';
 import { loadConfig, saveConfig, getConfigDir } from './config.js';
 import { spawn } from 'child_process';
 import { createEdgeNodeSecurity, type KeyPair } from '../security/edge-node.js';
+import { parseCliArgs, formatValueForDisplay } from './core/param-parser.js';
+import { formatResult, DisplayMode } from './core/display.js';
+import { globalHandlerRegistry } from './handlers/_registry.js';
+import type { ToolContext, PostflightContext } from './core/types.js';
 
 function printHelp(): void {
   console.log(`
@@ -61,7 +65,12 @@ Options for 'run':
   --params, -p <json>           Tool parameters as JSON
   --file, -f <path>             Read parameters from file
   --raw                         Output raw JSON
+  --table                       Output as table (if applicable)
+  --terminal                    Output for terminal consumption (minimal formatting)
   --<key> <value>               Pass individual parameters (e.g., --query "AI news")
+                                Arrays: --tickers AAPL,GOOGL (comma-separated)
+                                Numbers: --count 42
+                                Booleans: --enabled true
 
 Options for 'daemon start':
   --port <port>                 WebSocket port (default: 8765)
@@ -77,6 +86,7 @@ Examples:
   rainfall tools describe github-create-issue
   rainfall run exa-web-search -p '{"query": "AI news"}'
   rainfall run exa-web-search --query "AI news"
+  rainfall run finviz-quotes --tickers AAPL,GOOGL,MSFT
   rainfall run github-create-issue --owner facebook --repo react --title "Bug"
   rainfall run article-summarize -f ./article.json
   rainfall daemon start
@@ -94,6 +104,33 @@ function getRainfall(): Rainfall {
     apiKey: config.apiKey,
     baseUrl: config.baseUrl,
   });
+}
+
+/**
+ * Fetch all node IDs from the node-list endpoint
+ * This returns all executable tool IDs (including sub-tools like github-create-issue)
+ */
+async function fetchAllNodeIds(rainfall: Rainfall): Promise<string[]> {
+  try {
+    const client = rainfall.getClient();
+    const subscriberId = await (client as unknown as { ensureSubscriberId(): Promise<string> }).ensureSubscriberId();
+    
+    const result = await client.request<{ keys?: string[]; nodes?: Array<{ id: string }> }>(
+      `/olympic/subscribers/${subscriberId}/nodes/_utils/node-list`
+    );
+    
+    if (result.keys && Array.isArray(result.keys)) {
+      return result.keys;
+    }
+    
+    if (result.nodes && Array.isArray(result.nodes)) {
+      return result.nodes.map(n => n.id);
+    }
+    
+    return [];
+  } catch {
+    return [];
+  }
 }
 
 async function authLogin(args: string[]): Promise<void> {
@@ -211,6 +248,173 @@ function formatSchema(obj: unknown, indent = 0): string {
   return lines.join('\n');
 }
 
+/**
+ * Calculate Levenshtein distance between two strings
+ */
+function levenshteinDistance(a: string, b: string): number {
+  const matrix: number[][] = [];
+  
+  for (let i = 0; i <= b.length; i++) {
+    matrix[i] = [i];
+  }
+  
+  for (let j = 0; j <= a.length; j++) {
+    matrix[0][j] = j;
+  }
+  
+  for (let i = 1; i <= b.length; i++) {
+    for (let j = 1; j <= a.length; j++) {
+      if (b.charAt(i - 1) === a.charAt(j - 1)) {
+        matrix[i][j] = matrix[i - 1][j - 1];
+      } else {
+        matrix[i][j] = Math.min(
+          matrix[i - 1][j - 1] + 1, // substitution
+          matrix[i][j - 1] + 1,     // insertion
+          matrix[i - 1][j] + 1      // deletion
+        );
+      }
+    }
+  }
+  
+  return matrix[b.length][a.length];
+}
+
+/**
+ * Calculate Jaro-Winkler similarity between two strings
+ * Returns a value between 0 (no match) and 1 (exact match)
+ */
+function jaroWinklerSimilarity(a: string, b: string): number {
+  if (a === b) return 1;
+  if (a.length === 0 || b.length === 0) return 0;
+  
+  const matchDistance = Math.floor(Math.max(a.length, b.length) / 2) - 1;
+  const aMatches = new Array(a.length).fill(false);
+  const bMatches = new Array(b.length).fill(false);
+  let matches = 0;
+  let transpositions = 0;
+  
+  // Find matches
+  for (let i = 0; i < a.length; i++) {
+    const start = Math.max(0, i - matchDistance);
+    const end = Math.min(i + matchDistance + 1, b.length);
+    
+    for (let j = start; j < end; j++) {
+      if (bMatches[j] || a.charAt(i) !== b.charAt(j)) continue;
+      aMatches[i] = true;
+      bMatches[j] = true;
+      matches++;
+      break;
+    }
+  }
+  
+  if (matches === 0) return 0;
+  
+  // Count transpositions
+  let k = 0;
+  for (let i = 0; i < a.length; i++) {
+    if (!aMatches[i]) continue;
+    while (!bMatches[k]) k++;
+    if (a.charAt(i) !== b.charAt(k)) transpositions++;
+    k++;
+  }
+  
+  // Jaro similarity
+  const jaro = ((matches / a.length) + (matches / b.length) + ((matches - transpositions / 2) / matches)) / 3;
+  
+  // Jaro-Winkler: boost for common prefix
+  let prefixLength = 0;
+  for (let i = 0; i < Math.min(a.length, b.length); i++) {
+    if (a.charAt(i) === b.charAt(i)) {
+      prefixLength++;
+    } else {
+      break;
+    }
+  }
+  
+  const scalingFactor = 0.1;
+  return jaro + prefixLength * scalingFactor * (1 - jaro);
+}
+
+interface ToolInfo {
+  id: string;
+  description?: string;
+}
+
+/**
+ * Calculate similarity score between two tool IDs
+ */
+function calculateSimilarity(toolId: string, candidateId: string, description = ''): number {
+  const lowerToolId = toolId.toLowerCase();
+  const lowerCandidate = candidateId.toLowerCase();
+  
+  // Extract prefix if tool ID has dashes (e.g., "github-create-issue" -> "github")
+  const prefix = lowerToolId.split('-')[0];
+  const hasPrefix = lowerToolId.includes('-');
+  
+  // Combine multiple similarity metrics
+  const jwScore = jaroWinklerSimilarity(lowerToolId, lowerCandidate);
+  
+  // Normalize Levenshtein to a 0-1 score (1 = exact match)
+  const maxLen = Math.max(lowerToolId.length, lowerCandidate.length);
+  const lvScore = maxLen === 0 ? 1 : 1 - (levenshteinDistance(lowerToolId, lowerCandidate) / maxLen);
+  
+  // Check for substring match (boost score significantly)
+  let substringBoost = 0;
+  if (lowerCandidate.includes(lowerToolId) || lowerToolId.includes(lowerCandidate)) {
+    substringBoost = 0.4;
+  }
+  
+  // Prefix match boost: if user typed "github-..." and tool is "github", boost it
+  let prefixBoost = 0;
+  if (hasPrefix && lowerCandidate === prefix) {
+    prefixBoost = 0.5;
+  }
+  // Also boost if the tool ID starts with the same prefix
+  if (hasPrefix && lowerCandidate.startsWith(prefix + '-')) {
+    prefixBoost = 0.35;
+  }
+  
+  // Check description for query terms
+  const descMatch = description.toLowerCase().includes(lowerToolId) ? 0.1 : 0;
+  
+  // Combined score: weight Jaro-Winkler higher as it works well for short strings
+  return (jwScore * 0.4) + (lvScore * 0.25) + substringBoost + prefixBoost + descMatch;
+}
+
+/**
+ * Find similar tools based on string similarity (from tool objects)
+ */
+function findSimilarTools(toolId: string, tools: { id: string; description: string }[]): string[] {
+  const scored = tools.map(tool => ({
+    id: tool.id,
+    score: calculateSimilarity(toolId, tool.id, tool.description)
+  }));
+  
+  // Sort by score descending and return top matches
+  return scored
+    .filter(item => item.score > 0.35) // Minimum threshold
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 5)
+    .map(item => item.id);
+}
+
+/**
+ * Find similar tools based on string similarity (from string IDs)
+ */
+function findSimilarToolIds(toolId: string, toolIds: string[]): string[] {
+  const scored = toolIds.map(id => ({
+    id,
+    score: calculateSimilarity(toolId, id)
+  }));
+  
+  // Sort by score descending and return top matches
+  return scored
+    .filter(item => item.score > 0.35) // Minimum threshold
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 5)
+    .map(item => item.id);
+}
+
 async function describeTool(args: string[]): Promise<void> {
   const toolId = args[0];
   
@@ -246,6 +450,22 @@ async function describeTool(args: string[]): Promise<void> {
     console.log();
   } catch (error) {
     console.error(`Error: Tool '${toolId}' not found`);
+    
+    // Suggest similar tools using full node list
+    try {
+      const allNodeIds = await fetchAllNodeIds(rainfall);
+      const suggestions = findSimilarToolIds(toolId, allNodeIds);
+      
+      if (suggestions.length > 0) {
+        console.error('\nDid you mean:');
+        for (const suggestion of suggestions) {
+          console.error(`  • ${suggestion}`);
+        }
+      }
+    } catch {
+      // Ignore errors fetching suggestions
+    }
+    
     process.exit(1);
   }
 }
@@ -300,12 +520,18 @@ Options:
   -p, --params <json>    Tool parameters as JSON string
   -f, --file <path>      Read parameters from JSON file
   --raw                  Output raw JSON (no formatting)
+  --table                Output as table (if applicable)
+  --terminal             Output for terminal consumption (minimal formatting)
   --<key> <value>        Pass individual parameters (e.g., --query "AI news")
+                         Arrays: --tickers AAPL,GOOGL (comma-separated)
+                         Numbers: --count 42
+                         Booleans: --enabled true
 
 Examples:
   rainfall run figma-users-getMe
   rainfall run exa-web-search -p '{"query": "AI news"}'
   rainfall run exa-web-search --query "AI news"
+  rainfall run finviz-quotes --tickers AAPL,GOOGL,MSFT
   rainfall run github-create-issue --owner facebook --repo react --title "Bug"
   rainfall run github-create-issue -f ./issue.json
   echo '{"query": "hello"}' | rainfall run exa-web-search
@@ -315,6 +541,7 @@ Examples:
 
   let params: Record<string, unknown> = {};
   const rawArgs: string[] = [];
+  let displayMode: DisplayMode = 'pretty';
 
   // Parse options
   for (let i = 1; i < args.length; i++) {
@@ -345,19 +572,19 @@ Examples:
         process.exit(1);
       }
     } else if (arg === '--raw') {
-      // Output format flag, handled later
+      displayMode = 'raw';
+    } else if (arg === '--table') {
+      displayMode = 'table';
+    } else if (arg === '--terminal') {
+      displayMode = 'terminal';
     } else if (arg.startsWith('--')) {
       // Handle --key value style arguments
       const key = arg.slice(2); // Remove '--'
       const value = args[++i];
       if (value === undefined) {
-        console.error(`Error: ${arg} requires a value`);
-        process.exit(1);
-      }
-      // Try to parse as JSON, fallback to string
-      try {
-        params[key] = JSON.parse(value);
-      } catch {
+        // Flag-style boolean
+        params[key] = true;
+      } else {
         params[key] = value;
       }
     } else {
@@ -367,15 +594,11 @@ Examples:
   }
 
   // Check for piped input (only if stdin is not a TTY)
-  // We use a non-blocking approach to avoid hanging when there's no piped input
   if (!process.stdin.isTTY) {
-    // Pause stdin to prevent it from keeping the process alive
     process.stdin.pause();
     
-    // Check if there's any data available
     const fs = await import('fs');
     try {
-      // Use fs.read with a timeout to check for data
       const buffer = Buffer.alloc(1024);
       const bytesRead = await new Promise<number>((resolve) => {
         const timeout = setTimeout(() => resolve(0), 50);
@@ -388,7 +611,6 @@ Examples:
       if (bytesRead > 0) {
         let data = buffer.toString('utf8', 0, bytesRead);
         
-        // Try to read more if available
         while (true) {
           const more = await new Promise<number>((resolve) => {
             fs.read(process.stdin.fd, buffer, 0, 1024, null, (err, n) => {
@@ -415,37 +637,142 @@ Examples:
 
   const rainfall = getRainfall();
 
+  // Fetch schema for smart parsing and validation
+  let toolSchema: { parameters?: Record<string, { type?: string; optional?: boolean }> } | undefined;
+  try {
+    const fullSchema = await rainfall.getToolSchema(toolId);
+    toolSchema = {
+      parameters: fullSchema.parameters as Record<string, { type?: string; optional?: boolean }> | undefined
+    };
+  } catch {
+    // If we can't fetch schema, proceed without smart parsing
+  }
+
+  // Apply schema-aware parsing to CLI args
+  // Filter out CLI-specific flags that aren't tool parameters
+  const cliFlags = new Set(['--params', '-p', '--file', '-f', '--raw', '--table', '--terminal']);
+  const toolArgs = args.slice(1).filter((arg, i, arr) => {
+    // Skip CLI flags and their values
+    if (cliFlags.has(arg)) {
+      return false;
+    }
+    // Skip values of CLI flags
+    if (i > 0 && cliFlags.has(arr[i - 1])) {
+      return false;
+    }
+    return true;
+  });
+  
+  if (toolSchema?.parameters) {
+    const { parseCliArgs } = await import('./core/param-parser.js');
+    const parsedParams = parseCliArgs(
+      toolArgs, 
+      {
+        name: toolId,
+        description: '',
+        category: '',
+        parameters: toolSchema.parameters as Record<string, import('./core/param-parser.js').ParamSchema>,
+      }
+    );
+    params = { ...parsedParams, ...params };
+  }
+
   // If we have a single positional argument and no explicit params, 
   // try to use it as the value for a single-parameter tool
-  if (rawArgs.length === 1 && Object.keys(params).length === 0) {
-    try {
-      const schema = await rainfall.getToolSchema(toolId);
-      if (schema.parameters && typeof schema.parameters === 'object') {
-        const paramEntries = Object.entries(schema.parameters as Record<string, { optional?: boolean }>);
-        const requiredParams = paramEntries.filter(([, p]) => !p.optional);
-        
-        // If there's only one required parameter, use the positional arg as its value
-        if (requiredParams.length === 1) {
-          const [paramName] = requiredParams[0];
-          params = { [paramName]: rawArgs[0] };
-        }
-      }
-    } catch {
-      // If we can't fetch the schema, just proceed without the positional arg
+  if (rawArgs.length === 1 && Object.keys(params).length === 0 && toolSchema?.parameters) {
+    const paramEntries = Object.entries(toolSchema.parameters);
+    const requiredParams = paramEntries.filter(([, p]) => !p.optional);
+    
+    if (requiredParams.length === 1) {
+      const [paramName, paramSchema] = requiredParams[0];
+      const { parseValue } = await import('./core/param-parser.js');
+      params = { [paramName]: parseValue(rawArgs[0], paramSchema as import('./core/param-parser.js').ParamSchema) };
     }
   }
+
+  // Find tool handler if one exists
+  const handler = globalHandlerRegistry.findHandler(toolId);
   
+  // Build tool context
+  const toolContext: ToolContext = {
+    rainfall,
+    toolId,
+    params,
+    args: rawArgs,
+    flags: { raw: displayMode === 'raw' },
+  };
+
   try {
-    const result = await rainfall.executeTool(toolId, params);
-    
-    if (args.includes('--raw')) {
-      console.log(JSON.stringify(result));
+    // Run preflight if handler exists
+    let executionParams = params;
+    let preflightContext: Record<string, unknown> | undefined;
+    let skipExecution: unknown | undefined;
+
+    if (handler?.preflight) {
+      const preflightResult = await handler.preflight(toolContext);
+      if (preflightResult) {
+        if (preflightResult.skipExecution !== undefined) {
+          skipExecution = preflightResult.skipExecution;
+        }
+        if (preflightResult.params) {
+          executionParams = preflightResult.params;
+        }
+        preflightContext = preflightResult.context;
+      }
+    }
+
+    // Execute tool (unless preflight skipped it)
+    let result: unknown;
+    if (skipExecution !== undefined) {
+      result = skipExecution;
     } else {
-      console.log(JSON.stringify(result, null, 2));
+      result = await rainfall.executeTool(toolId, executionParams);
+    }
+
+    // Build postflight context
+    const postflightContext: PostflightContext = {
+      ...toolContext,
+      result,
+      preflightContext,
+    };
+
+    // Run postflight if handler exists
+    if (handler?.postflight) {
+      await handler.postflight(postflightContext);
+    }
+
+    // Display result
+    let displayed = false;
+    if (handler?.display) {
+      displayed = await handler.display({ ...postflightContext, flags: { ...toolContext.flags, mode: displayMode } });
+    }
+
+    if (!displayed) {
+      // Use default display with mode
+      const output = await formatResult(result, { mode: displayMode });
+      console.log(output);
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.error(`Error: ${message}`);
+    
+    // Suggest similar tools if it looks like a "tool not found" error
+    if (message.toLowerCase().includes('not found') || message.toLowerCase().includes('not found')) {
+      try {
+        const allNodeIds = await fetchAllNodeIds(rainfall);
+        const suggestions = findSimilarToolIds(toolId, allNodeIds);
+        
+        if (suggestions.length > 0) {
+          console.error('\nDid you mean:');
+          for (const suggestion of suggestions) {
+            console.error(`  • ${suggestion}`);
+          }
+        }
+      } catch {
+        // Ignore errors fetching suggestions
+      }
+    }
+    
     process.exit(1);
   }
 }
