@@ -262,7 +262,7 @@ export class Rainfall {
   async executeTool<T = unknown>(
     toolId: string, 
     params?: Record<string, unknown>,
-    options?: { skipValidation?: boolean; timeout?: number; retries?: number; retryDelay?: number }
+    options?: { skipValidation?: boolean; timeout?: number; retries?: number; retryDelay?: number; targetEdge?: string }
   ) {
     return this.client.executeTool<T>(toolId, params, options);
   }

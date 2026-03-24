@@ -48,6 +48,7 @@ Commands:
   config llm                    Show LLM configuration
   
   edge generate-keys            Generate key pair for edge node encryption
+  edge register <proc-node-id>  Register a proc node for edge execution
   edge status                   Show edge node security status
   
   version                       Show version information
@@ -522,6 +523,7 @@ Options:
   --raw                  Output raw JSON (no formatting)
   --table                Output as table (if applicable)
   --terminal             Output for terminal consumption (minimal formatting)
+  --target-edge <id>     Execute on specific edge node (for cross-node jobs)
   --<key> <value>        Pass individual parameters (e.g., --query "AI news")
                          Arrays: --tickers AAPL,GOOGL (comma-separated)
                          Numbers: --count 42
@@ -534,6 +536,7 @@ Examples:
   rainfall run finviz-quotes --tickers AAPL,GOOGL,MSFT
   rainfall run github-create-issue --owner facebook --repo react --title "Bug"
   rainfall run github-create-issue -f ./issue.json
+  rainfall run exa-web-search --query "latest AI" --target-edge <edge-id>
   echo '{"query": "hello"}' | rainfall run exa-web-search
 `);
     return;
@@ -542,6 +545,7 @@ Examples:
   let params: Record<string, unknown> = {};
   const rawArgs: string[] = [];
   let displayMode: DisplayMode = 'pretty';
+  let targetEdge: string | undefined;
 
   // Parse options
   for (let i = 1; i < args.length; i++) {
@@ -577,6 +581,12 @@ Examples:
       displayMode = 'table';
     } else if (arg === '--terminal') {
       displayMode = 'terminal';
+    } else if (arg === '--target-edge') {
+      targetEdge = args[++i];
+      if (!targetEdge) {
+        console.error('Error: --target-edge requires an edge node ID');
+        process.exit(1);
+      }
     } else if (arg.startsWith('--')) {
       // Handle --key value style arguments
       const key = arg.slice(2); // Remove '--'
@@ -650,7 +660,7 @@ Examples:
 
   // Apply schema-aware parsing to CLI args
   // Filter out CLI-specific flags that aren't tool parameters
-  const cliFlags = new Set(['--params', '-p', '--file', '-f', '--raw', '--table', '--terminal']);
+  const cliFlags = new Set(['--params', '-p', '--file', '-f', '--raw', '--table', '--terminal', '--target-edge']);
   const toolArgs = args.slice(1).filter((arg, i, arr) => {
     // Skip CLI flags and their values
     if (cliFlags.has(arg)) {
@@ -725,6 +735,9 @@ Examples:
     let result: unknown;
     if (skipExecution !== undefined) {
       result = skipExecution;
+    } else if (targetEdge) {
+      // Execute on specific edge node
+      result = await rainfall.executeTool(toolId, executionParams, { targetEdge });
     } else {
       result = await rainfall.executeTool(toolId, executionParams);
     }
@@ -1130,12 +1143,137 @@ async function edgeGenerateKeys(): Promise<void> {
     console.log('  Private:', privateKeyPath);
     console.log('\n📋 To register this edge node:');
     console.log('  1. Copy the public key above');
-    console.log('  2. Register with: rainfall edge register <public-key>');
+    console.log('  2. Register proc node with: rainfall edge register <proc-node-id> --public-key <key>');
     console.log('  3. The backend will return an edgeNodeSecret (JWT)');
     console.log('  4. Store the secret securely - it expires in 30 days');
     
   } catch (error) {
     console.error('❌ Failed to generate keys:', error instanceof Error ? error.message : error);
+    process.exit(1);
+  }
+}
+
+async function edgeRegister(args: string[]): Promise<void> {
+  const procNodeId = args[0];
+  
+  if (!procNodeId) {
+    console.error('Error: Proc node ID required');
+    console.error('\nUsage: rainfall edge register <proc-node-id> [options]');
+    console.error('\nOptions:');
+    console.error('  --public-key <key>    Public key for encryption (optional)');
+    console.error('  --list <id1,id2,...>  Register multiple proc nodes (comma-separated)');
+    console.error('\nExamples:');
+    console.error('  rainfall edge register exa-web-search');
+    console.error('  rainfall edge register exa-web-search --public-key "base64key..."');
+    console.error('  rainfall edge register --list "exa-web-search,github-create-issue"');
+    process.exit(1);
+  }
+
+  const rainfall = getRainfall();
+  const config = loadConfig();
+  
+  // Parse options
+  let publicKey: string | undefined;
+  let procNodeIds: string[] = [procNodeId];
+  
+  for (let i = 1; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === '--public-key' || arg === '-k') {
+      publicKey = args[++i];
+    } else if (arg === '--list' || arg === '-l') {
+      const list = args[++i];
+      if (list) {
+        procNodeIds = list.split(',').map(id => id.trim());
+      }
+    }
+  }
+
+  // Load public key from file if not provided directly
+  if (!publicKey) {
+    const configDir = getConfigDir();
+    const keysDir = join(configDir, 'keys');
+    const publicKeyPath = join(keysDir, 'edge-node.pub');
+    
+    if (existsSync(publicKeyPath)) {
+      publicKey = readFileSync(publicKeyPath, 'utf-8');
+    }
+  }
+
+  console.log(`🌐 Registering ${procNodeIds.length} proc node(s) for edge execution...\n`);
+
+  try {
+    // Step 1: Register the edge node itself (or get existing)
+    let edgeNodeId = config.edgeNodeId;
+    
+    if (!edgeNodeId) {
+      console.log('📡 Registering edge node with backend...');
+      const registerResult = await rainfall.executeTool<{ 
+        success: boolean;
+        edgeNodeId: string;
+        registeredAt: string;
+        expiresAt: string;
+      }>('register-edge-node', {
+        hostname: process.env.HOSTNAME || 'local-edge',
+        capabilities: procNodeIds,
+        version: '1.0.0',
+        metadata: {
+          publicKey: publicKey || undefined,
+          source: 'rainfall-devkit-cli',
+        },
+      });
+      
+      edgeNodeId = registerResult.edgeNodeId;
+      console.log(`   Edge node registered: ${edgeNodeId}`);
+    } else {
+      console.log(`   Using existing edge node: ${edgeNodeId}`);
+    }
+
+    // Step 2: Register proc nodes for this edge node
+    console.log('\n📡 Registering proc nodes...');
+    const result = await rainfall.executeTool<{ 
+      success: boolean; 
+      edgeNodeId: string;
+      edgeNodeSecret: string;
+      registeredProcNodes: string[];
+    }>('register-proc-edge-nodes', {
+      edgeNodeId,
+      procNodeIds,
+      publicKey,
+      hostname: process.env.HOSTNAME || 'local-edge',
+    });
+
+    if (!result.success) {
+      console.error('❌ Registration failed');
+      process.exit(1);
+    }
+
+    // Store the edge node credentials in config
+    config.edgeNodeId = result.edgeNodeId;
+    config.edgeNodeSecret = result.edgeNodeSecret;
+    config.edgeNodeKeysPath = join(getConfigDir(), 'keys');
+    saveConfig(config);
+
+    console.log('✅ Proc node(s) registered successfully!\n');
+    console.log('Edge Node ID:', result.edgeNodeId);
+    console.log('Proc Nodes Registered:');
+    for (const nodeId of result.registeredProcNodes) {
+      console.log(`  • ${nodeId}`);
+    }
+    console.log('\n🔐 Edge node secret stored in config.');
+    console.log('   This secret is used for authentication with the backend.');
+    console.log('\n📋 You can now run tools on this edge node:');
+    console.log(`   rainfall run ${procNodeIds[0]} --target-edge ${result.edgeNodeId}`);
+    
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error('❌ Failed to register proc node:', message);
+    
+    // Provide helpful guidance for common errors
+    if (message.includes('not found') || message.includes('does not exist')) {
+      console.error('\n💡 The backend may not have the registration tools yet.');
+      console.error('   Make sure you are running the latest version of Rainyday.');
+    }
+    
     process.exit(1);
   }
 }
@@ -1162,25 +1300,43 @@ async function edgeStatus(): Promise<void> {
   }
   
   const config = loadConfig();
+  
+  console.log('\nRegistration:');
   if (config.edgeNodeId) {
-    console.log('\nRegistration:');
     console.log('  Edge Node ID:', config.edgeNodeId);
+  } else {
+    console.log('  Edge Node ID: ❌ Not registered');
   }
   
   if (config.edgeNodeSecret) {
-    console.log('  JWT Secret: ✅ Present (expires: check with backend)');
+    console.log('  JWT Secret: ✅ Present');
+    // Show a masked version of the secret
+    const masked = config.edgeNodeSecret.substring(0, 10) + '...' + 
+                   config.edgeNodeSecret.substring(config.edgeNodeSecret.length - 4);
+    console.log('    (' + masked + ')');
   } else {
     console.log('  JWT Secret: ❌ Not configured');
+  }
+  
+  // Show proc node registration status
+  if (config.procNodeIds && config.procNodeIds.length > 0) {
+    console.log('\nRegistered Proc Nodes:');
+    for (const nodeId of config.procNodeIds) {
+      console.log(`  • ${nodeId}`);
+    }
   }
   
   console.log('\n📚 Next steps:');
   if (!hasPublicKey) {
     console.log('  1. Run: rainfall edge generate-keys');
+    console.log('  2. Run: rainfall edge register <proc-node-id>');
   } else if (!config.edgeNodeSecret) {
-    console.log('  1. Register your edge node with the backend');
-    console.log('  2. Store the returned edgeNodeSecret in config');
+    console.log('  1. Register your proc node:');
+    console.log('     rainfall edge register exa-web-search');
   } else {
     console.log('  Edge node is configured and ready for secure operation');
+    console.log('  Run tools on this edge node:');
+    console.log(`     rainfall run <tool> --target-edge ${config.edgeNodeId}`);
   }
 }
 
@@ -1304,12 +1460,15 @@ async function main(): Promise<void> {
         case 'generate-keys':
           await edgeGenerateKeys();
           break;
+        case 'register':
+          await edgeRegister(rest);
+          break;
         case 'status':
           await edgeStatus();
           break;
         default:
           console.error('Error: Unknown edge subcommand');
-          console.error('\nUsage: rainfall edge <generate-keys|status>');
+          console.error('\nUsage: rainfall edge <generate-keys|register|status>');
           process.exit(1);
       }
       break;

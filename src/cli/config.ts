@@ -50,6 +50,8 @@ export interface Config {
   edgeNodeKeysPath?: string;
   /** Enable secure mode (JWT validation, ACLs, encryption) */
   secureMode?: boolean;
+  /** Registered proc node IDs for edge execution */
+  procNodeIds?: string[];
 }
 
 /**

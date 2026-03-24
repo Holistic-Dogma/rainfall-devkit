@@ -163,7 +163,7 @@ export class RainfallClient {
   async executeTool<T = unknown>(
     toolId: string,
     params?: Record<string, unknown>,
-    options?: RequestOptions & { skipValidation?: boolean }
+    options?: RequestOptions & { skipValidation?: boolean; targetEdge?: string }
   ): Promise<T> {
     // Validate params before execution (unless skipped globally or per-call)
     if (!this.disableValidation && !options?.skipValidation) {
@@ -178,9 +178,16 @@ export class RainfallClient {
     }
 
     const subscriberId = await this.ensureSubscriberId();
+    
+    // Build request body - include targetEdge if specified
+    const body: Record<string, unknown> = params || {};
+    if (options?.targetEdge) {
+      body._targetEdge = options.targetEdge;
+    }
+    
     const response = await this.request<{ success: boolean; result: T; error?: string | unknown }>(`/olympic/subscribers/${subscriberId}/nodes/${toolId}`, {
       method: 'POST',
-      body: params || {},
+      body,
     }, options);
     
     // Check if the API returned success: false
