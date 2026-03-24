@@ -75,7 +75,7 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.27.1",
     "express": "^4",
-    "libsodium-wrappers": "^0.8.2",
+    "libsodium-wrappers-sumo": "^0.8.2",
     "ws": "^8"
   },
   "engines": {

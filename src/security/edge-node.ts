@@ -8,7 +8,7 @@
  * - Key pair generation for edge nodes
  */
 
-import * as sodium from 'libsodium-wrappers';
+import sodium from 'libsodium-wrappers-sumo';
 
 // JWT types
 export interface EdgeNodeJWT {
