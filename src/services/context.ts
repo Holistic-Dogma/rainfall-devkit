@@ -78,10 +78,14 @@ export class RainfallDaemonContext {
   async initialize(): Promise<void> {
     try {
       // Try to sync recent memories from cloud
-      const recentMemories = await this.rainfall.memory.recall({
+      // Clamp limit to 100 (backend validation limit)
+      const limit = Math.min(this.options.maxLocalMemories || 100, 100);
+      const result = await this.rainfall.memory.recall({
         queries: ['daemon:context'],
-        limit: this.options.maxLocalMemories,
-      }) as Array<{ id: string; content: string; keywords?: string[]; timestamp: string; source?: string; metadata?: Record<string, unknown> }>;
+        limit,
+      }) as { memories?: Array<{ id: string; content: string; keywords?: string[]; timestamp: string; source?: string; metadata?: Record<string, unknown> }> };
+
+      const recentMemories = result.memories || [];
 
       for (const memory of recentMemories) {
         this.localMemories.set(memory.id, {
@@ -222,7 +226,10 @@ export class RainfallDaemonContext {
 
     // Also query cloud for more results
     try {
-      const cloudResults = await this.rainfall.memory.recall({ queries: [query], limit: topK }) as Array<{ id: string; content: string; keywords?: string[]; timestamp: string; source?: string; metadata?: Record<string, unknown> }>;
+      // Clamp limit to 100 (backend validation limit)
+      const limit = Math.min(topK, 100);
+      const result = await this.rainfall.memory.recall({ queries: [query], limit }) as { memories?: Array<{ id: string; content: string; keywords?: string[]; timestamp: string; source?: string; metadata?: Record<string, unknown> }> };
+      const cloudResults = result.memories || [];
       
       // Merge results, preferring local
       const seen = new Set(localResults.map(r => r.id));

@@ -53,6 +53,10 @@ export interface NetworkedExecutorOptions {
   capabilities?: NodeCapabilities;
   /** Hostname identifier */
   hostname?: string;
+  /** Existing edge node ID to reuse (from config) */
+  edgeNodeId?: string;
+  /** Callback when a new edge node ID is registered (to save to config) */
+  onEdgeNodeRegistered?: (edgeNodeId: string) => void;
 }
 
 export class RainfallNetworkedExecutor {
@@ -82,9 +86,37 @@ export class RainfallNetworkedExecutor {
 
   /**
    * Register this edge node with the Rainfall backend
+   * Reuses existing edgeNodeId from config if available and valid
    */
   async registerEdgeNode(): Promise<string> {
     const capabilities = this.buildCapabilitiesList();
+    
+    // If we have an existing edge node ID from config, try to reuse it
+    if (this.options.edgeNodeId) {
+      try {
+        // Try to register proc nodes with the existing edge node ID
+        // This will fail if the edge node doesn't exist or has expired
+        await this.rainfall.executeTool('register-proc-edge-nodes', {
+          edgeNodeId: this.options.edgeNodeId,
+          procNodeIds: [`proc-${this.options.hostname}-${Date.now()}`],
+          publicKey: '',
+          hostname: this.options.hostname,
+          httpPort: this.options.httpPort,
+        });
+        
+        this.edgeNodeId = this.options.edgeNodeId;
+        console.log(`🌐 Edge node reconnected to Rainfall as ${this.edgeNodeId}`);
+        return this.edgeNodeId;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (message.includes('expired') || message.includes('not found')) {
+          console.log(`⚠️  Existing edge node ${this.options.edgeNodeId} expired, registering new one...`);
+        } else {
+          console.log(`⚠️  Could not reuse existing edge node: ${message}`);
+        }
+        // Continue to register a new edge node
+      }
+    }
     
     try {
       // Use the register-edge-node tool if available, otherwise fallback to direct API
@@ -98,6 +130,12 @@ export class RainfallNetworkedExecutor {
 
       this.edgeNodeId = result.edgeNodeId;
       console.log(`🌐 Edge node registered with Rainfall as ${this.edgeNodeId}`);
+      
+      // Notify callback to save to config
+      if (this.options.onEdgeNodeRegistered) {
+        this.options.onEdgeNodeRegistered(this.edgeNodeId);
+      }
+      
       return this.edgeNodeId;
     } catch (error) {
       // Fallback: generate a local edge node ID if the backend doesn't have register-edge-node yet

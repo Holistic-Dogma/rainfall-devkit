@@ -188,6 +188,10 @@ export class RainfallDaemon {
     });
     await this.context.initialize();
 
+    // Load config to get existing edge node ID
+    const { loadConfig, saveConfig } = await import('../cli/config.js');
+    const config = loadConfig();
+
     // Initialize networked executor
     this.networkedExecutor = new RainfallNetworkedExecutor(this.rainfall, {
       wsPort: this.port,
@@ -197,6 +201,13 @@ export class RainfallDaemon {
         localExec: true,
         fileWatch: true,
         passiveListen: true,
+      },
+      edgeNodeId: config.edgeNodeId, // Pass existing edge node ID from config
+      onEdgeNodeRegistered: (edgeNodeId: string) => {
+        // Save new edge node ID to config
+        config.edgeNodeId = edgeNodeId;
+        saveConfig(config);
+        this.log(`💾 Saved edge node ID to config: ${edgeNodeId}`);
       },
     });
 

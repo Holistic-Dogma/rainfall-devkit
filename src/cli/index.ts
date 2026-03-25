@@ -1274,6 +1274,19 @@ async function edgeRegister(args: string[]): Promise<void> {
       console.error('   Make sure you are running the latest version of Rainyday.');
     }
     
+    // Handle expired edge node - clear config and suggest retry
+    if (message.includes('expired') && config.edgeNodeId) {
+      console.error('\n💡 Your edge node registration has expired.');
+      console.error('   Clearing stale edge node ID from config...');
+      
+      // Clear the expired edge node ID
+      delete config.edgeNodeId;
+      delete config.edgeNodeSecret;
+      saveConfig(config);
+      
+      console.error('   ✅ Config cleared. Please retry the command to register a new edge node.');
+    }
+    
     process.exit(1);
   }
 }
