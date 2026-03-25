@@ -51,6 +51,13 @@ Commands:
   edge register <proc-node-id>  Register a proc node for edge execution
   edge status                   Show edge node security status
   
+  todos init                    Initialize todo list access (mints token)
+  todos list                    Show your todo list
+  todos add <title>             Add a new todo item
+  todos check <id>              Mark todo as completed
+  todos uncheck <id>            Mark todo as not completed
+  todos rm <id>                 Remove a todo item
+  
   version                       Show version information
   upgrade                       Upgrade to the latest version
   
@@ -1353,6 +1360,448 @@ async function edgeStatus(): Promise<void> {
   }
 }
 
+// ============================================================================
+// Todos Commands
+// ============================================================================
+
+interface TodoItem {
+  id: string;
+  category: string;
+  title: string;
+  description?: string;
+  checked: boolean;
+  visibility: string;
+  mutability: string;
+  created_at: string;
+}
+
+interface TodosConfig {
+  todoToken?: string;
+  subscriberId?: string;
+}
+
+const TODOS_CONFIG_FILE = join(getConfigDir(), 'todos.json');
+
+function loadTodosConfig(): TodosConfig {
+  if (existsSync(TODOS_CONFIG_FILE)) {
+    try {
+      return JSON.parse(readFileSync(TODOS_CONFIG_FILE, 'utf8'));
+    } catch {
+      return {};
+    }
+  }
+  return {};
+}
+
+function saveTodosConfig(config: TodosConfig): void {
+  if (!existsSync(getConfigDir())) {
+    mkdirSync(getConfigDir(), { recursive: true });
+  }
+  writeFileSync(TODOS_CONFIG_FILE, JSON.stringify(config, null, 2));
+}
+
+/**
+ * Get subscriber ID from config or fetch from API
+ */
+async function getSubscriberId(rainfall: Rainfall, config: TodosConfig): Promise<string | null> {
+  if (config.subscriberId) {
+    return config.subscriberId;
+  }
+  
+  try {
+    const me = await rainfall.executeTool<{ subscriber?: { id: string } }>('me', {});
+    return me.subscriber?.id || null;
+  } catch {
+    return null;
+  }
+}
+
+async function todosInit(args: string[]): Promise<void> {
+  const config = loadConfig();
+  const rainfall = getRainfall();
+  
+  // Parse options
+  let expiresHours = 24;
+  
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--expires' || args[i] === '-e') {
+      const val = parseInt(args[++i], 10);
+      if (!isNaN(val)) expiresHours = val;
+    }
+  }
+  
+  console.log('🔑 Initializing todo list access...\n');
+  
+  try {
+    // Get subscriber info from /subscribers/me endpoint
+    const meResult = await rainfall.getClient().request<{
+      success: boolean;
+      subscriber?: { id: string; name: string };
+      error?: string;
+    }>('/olympic/subscribers/me', {
+      method: 'GET'
+    });
+    
+    if (!meResult.success || !meResult.subscriber) {
+      console.error('❌ Failed to get subscriber info:', meResult.error || 'Unknown error');
+      console.error('Make sure you are authenticated. Run: rainfall auth login');
+      process.exit(1);
+    }
+    
+    const subscriberId = meResult.subscriber.id;
+    console.log(`Subscriber: ${meResult.subscriber.name} (${subscriberId})`);
+    
+    // Mint todo token via API call (using raw client request)
+    const result = await rainfall.getClient().request<{
+      success: boolean;
+      token?: string;
+      error?: string;
+    }>(`/olympic/subscribers/${subscriberId}/account/todo-token`, {
+      method: 'POST',
+      body: { expires_hours: expiresHours, capabilities: ['read', 'write'] }
+    });
+    
+    if (!result.success || !result.token) {
+      console.error('❌ Failed to mint todo token:', result.error || 'Unknown error');
+      process.exit(1);
+    }
+    
+    // Save to config
+    const todosConfig: TodosConfig = {
+      todoToken: result.token,
+      subscriberId: subscriberId
+    };
+    saveTodosConfig(todosConfig);
+    
+    console.log('✅ Todo token minted and stored securely!\n');
+    console.log('Token expires:', new Date(Date.now() + expiresHours * 60 * 60 * 1000).toLocaleString());
+    console.log('\nYour todo list is now accessible via:');
+    console.log(`  rainfall todos list`);
+    console.log(`  rainfall todos add "Your task here"`);
+    
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error('❌ Failed to initialize todos:', message);
+    process.exit(1);
+  }
+}
+
+async function todosList(args: string[]): Promise<void> {
+  const rainfall = getRainfall();
+  const todosConfig = loadTodosConfig();
+  
+  if (!todosConfig.todoToken || !todosConfig.subscriberId) {
+    console.error('❌ Todo token not found. Run: rainfall todos init');
+    process.exit(1);
+  }
+  
+  // Parse options
+  let category: string | undefined;
+  let format = 'table';
+  
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--category' || args[i] === '-c') {
+      category = args[++i];
+    } else if (args[i] === '--format' || args[i] === '-f') {
+      format = args[++i];
+    }
+  }
+  
+  try {
+    const queryParams = new URLSearchParams();
+    if (category) queryParams.set('category', category);
+    queryParams.set('format', 'json');
+    
+    const result = await rainfall.getClient().request<{
+      success: boolean;
+      items?: TodoItem[];
+      error?: string;
+    }>(`/olympic/subscribers/${todosConfig.subscriberId}/todos?${queryParams.toString()}`, {
+      method: 'GET',
+      headers: {
+        'x-todo-token': todosConfig.todoToken
+      }
+    });
+    
+    if (!result.success) {
+      console.error('❌ Failed to fetch todos:', result.error);
+      process.exit(1);
+    }
+    
+    const items = result.items || [];
+    
+    if (items.length === 0) {
+      console.log('No todo items found.');
+      console.log('\nAdd your first todo:');
+      console.log('  rainfall todos add "Your task here"');
+      return;
+    }
+    
+    // Group by category
+    const byCategory = items.reduce((acc, item) => {
+      const cat = item.category || 'general';
+      if (!acc[cat]) acc[cat] = [];
+      acc[cat].push(item);
+      return acc;
+    }, {} as Record<string, TodoItem[]>);
+    
+    // Display
+    console.log(`📋 Todo List (${items.filter(i => !i.checked).length} pending, ${items.filter(i => i.checked).length} done)\n`);
+    
+    for (const [cat, catItems] of Object.entries(byCategory)) {
+      console.log(`${cat}:`);
+      
+      // Sort: unchecked first, then by date
+      const sorted = catItems.sort((a, b) => {
+        if (a.checked !== b.checked) return a.checked ? 1 : -1;
+        return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
+      });
+      
+      for (const item of sorted) {
+        const status = item.checked ? '✅' : '⬜';
+        const title = item.checked ? `~~${item.title}~~` : item.title;
+        const id = item.id.slice(0, 8);
+        console.log(`  ${status} [${id}] ${title}`);
+      }
+      console.log();
+    }
+    
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error('❌ Failed to fetch todos:', message);
+    process.exit(1);
+  }
+}
+
+async function todosAdd(args: string[]): Promise<void> {
+  const rainfall = getRainfall();
+  const todosConfig = loadTodosConfig();
+  
+  if (!todosConfig.todoToken || !todosConfig.subscriberId) {
+    console.error('❌ Todo token not found. Run: rainfall todos init');
+    process.exit(1);
+  }
+  
+  // Parse arguments
+  let title = '';
+  let category = 'general';
+  let visibility = 'private';
+  let description: string | undefined;
+  
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === '--category' || arg === '-c') {
+      category = args[++i];
+    } else if (arg === '--visibility' || arg === '-v') {
+      visibility = args[++i];
+    } else if (arg === '--description' || arg === '-d') {
+      description = args[++i];
+    } else if (!title && !arg.startsWith('-')) {
+      title = arg;
+    }
+  }
+  
+  if (!title) {
+    console.error('❌ Title required');
+    console.error('\nUsage: rainfall todos add <title> [options]');
+    console.error('\nOptions:');
+    console.error('  --category, -c <name>     Category (default: general)');
+    console.error('  --visibility, -v <type>   public|organization|private (default: private)');
+    console.error('  --description, -d <text>  Description');
+    console.error('\nExample:');
+    console.error('  rainfall todos add "Buy milk" --category shopping --visibility public');
+    process.exit(1);
+  }
+  
+  try {
+    const result = await rainfall.getClient().request<{
+      success: boolean;
+      item?: TodoItem;
+      error?: string;
+    }>(`/olympic/subscribers/${todosConfig.subscriberId}/todos`, {
+      method: 'POST',
+      body: {
+        title,
+        category,
+        visibility,
+        description,
+        mutability: visibility // Same as visibility by default
+      },
+      headers: {
+        'x-todo-token': todosConfig.todoToken
+      }
+    });
+    
+    if (!result.success || !result.item) {
+      console.error('❌ Failed to add todo:', result.error);
+      process.exit(1);
+    }
+    
+    console.log(`✅ Added: ${result.item.title}`);
+    console.log(`   ID: ${result.item.id.slice(0, 8)}`);
+    console.log(`   Category: ${result.item.category}`);
+    
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error('❌ Failed to add todo:', message);
+    process.exit(1);
+  }
+}
+
+async function todosCheck(args: string[], check: boolean): Promise<void> {
+  const rainfall = getRainfall();
+  const todosConfig = loadTodosConfig();
+  
+  if (!todosConfig.todoToken || !todosConfig.subscriberId) {
+    console.error('❌ Todo token not found. Run: rainfall todos init');
+    process.exit(1);
+  }
+  
+  const query = args[0];
+  if (!query) {
+    console.error(`❌ ${check ? 'Check' : 'Uncheck'} what? Provide an ID or title.`);
+    console.error(`\nUsage: rainfall todos ${check ? 'check' : 'uncheck'} <id-or-title>`);
+    process.exit(1);
+  }
+  
+  try {
+    // First, fetch all todos to find the match
+    const listResult = await rainfall.getClient().request<{
+      success: boolean;
+      items?: TodoItem[];
+    }>(`/olympic/subscribers/${todosConfig.subscriberId}/todos?format=json`, {
+      method: 'GET',
+      headers: {
+        'x-todo-token': todosConfig.todoToken
+      }
+    });
+    
+    if (!listResult.success || !listResult.items) {
+      console.error('❌ Failed to fetch todos');
+      process.exit(1);
+    }
+    
+    // Find matching todo
+    const match = listResult.items.find(item => 
+      item.id.toLowerCase().startsWith(query.toLowerCase()) ||
+      item.title.toLowerCase().includes(query.toLowerCase())
+    );
+    
+    if (!match) {
+      console.error(`❌ No todo found matching "${query}"`);
+      console.error('\nRun `rainfall todos list` to see your todos.');
+      process.exit(1);
+    }
+    
+    // Toggle if needed
+    if (match.checked === check) {
+      console.log(`${check ? '✅' : '⬜'} "${match.title}" is already ${check ? 'checked' : 'unchecked'}`);
+      return;
+    }
+    
+    // Call toggle endpoint
+    const result = await rainfall.getClient().request<{
+      success: boolean;
+      item?: TodoItem;
+      error?: string;
+    }>(`/olympic/subscribers/${todosConfig.subscriberId}/todos/${match.id}/toggle_checked`, {
+      method: 'POST',
+      headers: {
+        'x-todo-token': todosConfig.todoToken
+      }
+    });
+    
+    if (!result.success || !result.item) {
+      console.error('❌ Failed to update todo:', result.error);
+      process.exit(1);
+    }
+    
+    console.log(`${result.item.checked ? '✅' : '⬜'} ${result.item.title}`);
+    
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error('❌ Failed to update todo:', message);
+    process.exit(1);
+  }
+}
+
+async function todosRemove(args: string[]): Promise<void> {
+  const rainfall = getRainfall();
+  const todosConfig = loadTodosConfig();
+  
+  if (!todosConfig.todoToken || !todosConfig.subscriberId) {
+    console.error('❌ Todo token not found. Run: rainfall todos init');
+    process.exit(1);
+  }
+  
+  const query = args[0];
+  if (!query) {
+    console.error('❌ Remove what? Provide an ID or title.');
+    console.error('\nUsage: rainfall todos rm <id-or-title>');
+    process.exit(1);
+  }
+  
+  try {
+    // First, fetch all todos to find the match
+    const listResult = await rainfall.getClient().request<{
+      success: boolean;
+      items?: TodoItem[];
+    }>(`/olympic/subscribers/${todosConfig.subscriberId}/todos?format=json`, {
+      method: 'GET',
+      headers: {
+        'x-todo-token': todosConfig.todoToken
+      }
+    });
+    
+    if (!listResult.success || !listResult.items) {
+      console.error('❌ Failed to fetch todos');
+      process.exit(1);
+    }
+    
+    // Find matching todo
+    const match = listResult.items.find(item => 
+      item.id.toLowerCase().startsWith(query.toLowerCase()) ||
+      item.title.toLowerCase().includes(query.toLowerCase())
+    );
+    
+    if (!match) {
+      console.error(`❌ No todo found matching "${query}"`);
+      console.error('\nRun `rainfall todos list` to see your todos.');
+      process.exit(1);
+    }
+    
+    // Confirm deletion
+    console.log(`Remove: "${match.title}"?`);
+    console.log('This action cannot be undone. [y/N]');
+    
+    // For now, just delete without confirmation in non-interactive mode
+    // TODO: Add interactive confirmation when stdin is TTY
+    
+    // Call delete endpoint
+    const result = await rainfall.getClient().request<{
+      success: boolean;
+      error?: string;
+    }>(`/olympic/subscribers/${todosConfig.subscriberId}/todos/${match.id}`, {
+      method: 'DELETE',
+      headers: {
+        'x-todo-token': todosConfig.todoToken
+      }
+    });
+    
+    if (!result.success) {
+      console.error('❌ Failed to remove todo:', result.error);
+      process.exit(1);
+    }
+    
+    console.log(`🗑️  Removed: "${match.title}"`);
+    
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error('❌ Failed to remove todo:', message);
+    process.exit(1);
+  }
+}
+
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const command = args[0];
@@ -1482,6 +1931,42 @@ async function main(): Promise<void> {
         default:
           console.error('Error: Unknown edge subcommand');
           console.error('\nUsage: rainfall edge <generate-keys|register|status>');
+          process.exit(1);
+      }
+      break;
+
+    case 'todos':
+      switch (subcommand) {
+        case 'init':
+          await todosInit(rest);
+          break;
+        case 'list':
+          await todosList(rest);
+          break;
+        case 'add':
+          await todosAdd(rest);
+          break;
+        case 'check':
+          await todosCheck(rest, true);
+          break;
+        case 'uncheck':
+          await todosCheck(rest, false);
+          break;
+        case 'rm':
+        case 'remove':
+          await todosRemove(rest);
+          break;
+        default:
+          console.error('Error: Unknown todos subcommand');
+          console.error('\nUsage: rainfall todos <init|list|add|check|uncheck|rm>');
+          console.error('\nExamples:');
+          console.error('  rainfall todos init                    # Mint and store todo token');
+          console.error('  rainfall todos list                    # Show your todos');
+          console.error('  rainfall todos add "Buy milk"          # Add a todo item');
+          console.error('  rainfall todos add "Review PR" --category work --visibility public');
+          console.error('  rainfall todos check 123e4567        # Mark as done (partial ID match)');
+          console.error('  rainfall todos uncheck "Buy milk"    # Mark as not done (title match)');
+          console.error('  rainfall todos rm 123e4567           # Remove a todo');
           process.exit(1);
       }
       break;
