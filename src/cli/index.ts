@@ -52,6 +52,8 @@ Commands:
   edge status                   Show edge node security status
   
   todos init                    Initialize todo list access (mints token)
+  todos init --show-token       Initialize and display token for sharing
+  todos token                   Show existing todo token
   todos list                    Show your todo list
   todos add <title>             Add a new todo item
   todos check <id>              Mark todo as completed
@@ -1422,11 +1424,14 @@ async function todosInit(args: string[]): Promise<void> {
   
   // Parse options
   let expiresHours = 24;
+  let showToken = false;
   
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--expires' || args[i] === '-e') {
       const val = parseInt(args[++i], 10);
       if (!isNaN(val)) expiresHours = val;
+    } else if (args[i] === '--show-token' || args[i] === '-s') {
+      showToken = true;
     }
   }
   
@@ -1474,10 +1479,24 @@ async function todosInit(args: string[]): Promise<void> {
     saveTodosConfig(todosConfig);
     
     console.log('✅ Todo token minted and stored securely!\n');
+    
+    // Show token if requested (for sharing with web agents)
+    if (showToken) {
+      console.log('🔐 Your todo token (copy this for web-agent platforms):');
+      console.log('─────────────────────────────────────────────────────────');
+      console.log(result.token);
+      console.log('─────────────────────────────────────────────────────────\n');
+    }
+    
     console.log('Token expires:', new Date(Date.now() + expiresHours * 60 * 60 * 1000).toLocaleString());
     console.log('\nYour todo list is now accessible via:');
     console.log(`  rainfall todos list`);
     console.log(`  rainfall todos add "Your task here"`);
+    
+    if (!showToken) {
+      console.log('\n💡 To share this token with a web-agent platform, run:');
+      console.log(`  rainfall todos init --show-token`);
+    }
     
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -1802,6 +1821,24 @@ async function todosRemove(args: string[]): Promise<void> {
   }
 }
 
+async function todosToken(): Promise<void> {
+  const todosConfig = loadTodosConfig();
+  
+  if (!todosConfig.todoToken || !todosConfig.subscriberId) {
+    console.error('❌ Todo token not found. Run: rainfall todos init');
+    process.exit(1);
+  }
+
+  console.log('🔐 Your todo token:\n');
+  console.log('─────────────────────────────────────────────────────────');
+  console.log(todosConfig.todoToken);
+  console.log('─────────────────────────────────────────────────────────\n');
+  console.log('Subscriber ID:', todosConfig.subscriberId);
+  console.log('\nUse this token with web-agent platforms! Either as header or query parameter.');
+  console.log(`Visit https://olympic-api.pragma-digital.org/v1/olympic/subscribers/${todosConfig.subscriberId}/todos?token=${todosConfig.todoToken.slice(0, 20)}... (or paste it in to your favorite chat AI with web browsing capabilities).`)
+  console.log("You can also pass the token as an x-todo-token header to the API.")
+}
+
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const command = args[0];
@@ -1956,11 +1993,16 @@ async function main(): Promise<void> {
         case 'remove':
           await todosRemove(rest);
           break;
+        case 'token':
+          await todosToken();
+          break;
         default:
           console.error('Error: Unknown todos subcommand');
-          console.error('\nUsage: rainfall todos <init|list|add|check|uncheck|rm>');
+          console.error('\nUsage: rainfall todos <init|list|add|check|uncheck|rm|token>');
           console.error('\nExamples:');
           console.error('  rainfall todos init                    # Mint and store todo token');
+          console.error('  rainfall todos init --show-token       # Mint and display token for sharing');
+          console.error('  rainfall todos token                   # Show existing token');
           console.error('  rainfall todos list                    # Show your todos');
           console.error('  rainfall todos add "Buy milk"          # Add a todo item');
           console.error('  rainfall todos add "Review PR" --category work --visibility public');
