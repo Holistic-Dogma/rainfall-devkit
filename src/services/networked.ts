@@ -61,6 +61,9 @@ export class RainfallNetworkedExecutor {
   private edgeNodeId?: string;
   private jobCallbacks = new Map<string, (result: unknown, error?: string) => void>();
   private resultPollingInterval?: NodeJS.Timeout;
+  private jobClaimInterval?: NodeJS.Timeout;
+  private isClaiming = false;
+  private jobExecutor?: (toolId: string, params: Record<string, unknown>) => Promise<unknown>;
 
   constructor(rainfall: Rainfall, options: NetworkedExecutorOptions = {}) {
     this.rainfall = rainfall;
@@ -246,6 +249,58 @@ export class RainfallNetworkedExecutor {
       return result.job;
     } catch {
       return null;
+    }
+  }
+
+  /**
+   * Start polling for jobs to execute
+   * @param executor - Function to execute the tool and return the result
+   */
+  startJobPolling(executor: (toolId: string, params: Record<string, unknown>) => Promise<unknown>): void {
+    if (this.jobClaimInterval) return; // Already polling
+    
+    this.jobExecutor = executor;
+    console.log('🔄 Started polling for edge jobs');
+    
+    this.jobClaimInterval = setInterval(async () => {
+      if (this.isClaiming) return; // Prevent concurrent claims
+      this.isClaiming = true;
+      
+      try {
+        const job = await this.claimJob();
+        
+        if (job) {
+          console.log(`📥 Claimed job ${job.jobId} for tool ${job.toolId}`);
+          
+          try {
+            // Execute the job
+            const result = await executor(job.toolId, job.params);
+            
+            // Submit the result
+            await this.submitJobResult(job.jobId, result);
+            console.log(`✅ Completed job ${job.jobId}`);
+          } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            await this.submitJobResult(job.jobId, null, errorMessage);
+            console.log(`❌ Failed job ${job.jobId}: ${errorMessage}`);
+          }
+        }
+      } catch (error) {
+        // Silent fail - will retry on next interval
+      } finally {
+        this.isClaiming = false;
+      }
+    }, 3000); // Poll every 3 seconds
+  }
+
+  /**
+   * Stop polling for jobs
+   */
+  stopJobPolling(): void {
+    if (this.jobClaimInterval) {
+      clearInterval(this.jobClaimInterval);
+      this.jobClaimInterval = undefined;
+      console.log('🛑 Stopped polling for edge jobs');
     }
   }
 

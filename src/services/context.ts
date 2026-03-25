@@ -79,8 +79,8 @@ export class RainfallDaemonContext {
     try {
       // Try to sync recent memories from cloud
       const recentMemories = await this.rainfall.memory.recall({
-        query: 'daemon:context',
-        topK: this.options.maxLocalMemories,
+        queries: ['daemon:context'],
+        limit: this.options.maxLocalMemories,
       }) as Array<{ id: string; content: string; keywords?: string[]; timestamp: string; source?: string; metadata?: Record<string, unknown> }>;
 
       for (const memory of recentMemories) {
@@ -222,7 +222,7 @@ export class RainfallDaemonContext {
 
     // Also query cloud for more results
     try {
-      const cloudResults = await this.rainfall.memory.recall({ query, topK }) as Array<{ id: string; content: string; keywords?: string[]; timestamp: string; source?: string; metadata?: Record<string, unknown> }>;
+      const cloudResults = await this.rainfall.memory.recall({ queries: [query], limit: topK }) as Array<{ id: string; content: string; keywords?: string[]; timestamp: string; source?: string; metadata?: Record<string, unknown> }>;
       
       // Merge results, preferring local
       const seen = new Set(localResults.map(r => r.id));

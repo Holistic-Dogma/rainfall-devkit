@@ -208,6 +208,34 @@ export class RainfallDaemon {
       this.log(`📬 Job ${jobId} ${error ? 'failed' : 'completed'}`, error || result);
     });
 
+    // Start polling for jobs to execute
+    this.networkedExecutor.startJobPolling(async (toolId, params) => {
+      this.log(`🔧 Executing job: ${toolId}`);
+      const startTime = Date.now();
+      
+      try {
+        const result = await this.executeLocalTool(toolId, params);
+        const duration = Date.now() - startTime;
+        
+        // Record execution in context
+        if (this.context) {
+          this.context.recordExecution(toolId, params, result, { duration });
+        }
+        
+        return result;
+      } catch (error) {
+        const duration = Date.now() - startTime;
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        
+        // Record failed execution
+        if (this.context) {
+          this.context.recordExecution(toolId, params, null, { error: errorMessage, duration });
+        }
+        
+        throw error;
+      }
+    });
+
     // Initialize listener registry
     this.listeners = new RainfallListenerRegistry(
       this.rainfall,
@@ -261,6 +289,11 @@ export class RainfallDaemon {
     // Stop all listeners
     if (this.listeners) {
       await this.listeners.stopAll();
+    }
+
+    // Stop job polling
+    if (this.networkedExecutor) {
+      this.networkedExecutor.stopJobPolling();
     }
 
     // Unregister edge node
