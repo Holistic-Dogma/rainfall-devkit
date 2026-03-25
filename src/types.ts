@@ -151,7 +151,7 @@ export namespace Memory {
   export interface MemoryClient {
     create(params: { content: string; keywords?: string[]; metadata?: Record<string, unknown> }): Promise<unknown>;
     get(params: { memoryId: string }): Promise<unknown>;
-    recall(params: { query: string; topK?: number; threshold?: number }): Promise<unknown>;
+    recall(params: { queries?: string[]; keywords?: string[]; vectors?: number[][]; limit?: number; min_score?: number; strategies?: string[]; categories?: string[]; date_range?: { start?: string; end?: string }; include_scores?: boolean; search_method?: string }): Promise<unknown>;
     list(params?: { limit?: number; offset?: number }): Promise<unknown>;
     update(params: { memoryId: string; content?: string; metadata?: Record<string, unknown> }): Promise<unknown>;
     delete(params: { memoryId: string }): Promise<unknown>;
