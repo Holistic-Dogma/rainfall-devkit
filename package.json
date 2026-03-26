@@ -78,6 +78,9 @@
     "libsodium-wrappers-sumo": "^0.8.2",
     "ws": "^8"
   },
+  "optionalDependencies": {
+    "termichart": "^0.1.0"
+  },
   "engines": {
     "node": ">=18"
   }

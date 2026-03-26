@@ -1,32 +1,44 @@
-# Rainfall SDK
+# Rainfall DevKit SDK
 
-Official SDK for the Rainfall API - 200+ tools for building AI-powered applications.
-Utilities to leverage the backend tools we use for our own applications like [Harmonic](https://harmonic.iswork.in) to bootstrap your own projects.
+**Official TypeScript SDK for the Rainfall platform — 200+ production-grade AI tools in one secure API key.**
+
+Built to power real workflows: RAG pipelines, multi-node orchestration (better than n8n in my opinion), document intelligence, web research, financial analysis, and more.
+
+### Pricing & Access
+This is, regrettably, a paid service. 
+The Rainfall backend runs real infrastructure (LLMs, embeddings, search engines, secure edge nodes, etc.), so we charge a fair price.
+
+- **Indie Tier**: $9/month — 60 requests per minute + usage credits (metered overages coming soon)  
+- Higher tiers and prepaid credit packs available soon
+
+Your API key gives you immediate access after purchase. No hidden fees for the core tools.
+*Please* let us know (fall@pragma-digital.com) whether something doesn't work - or add an issue on the github- and we'll fix it asap!
+
+Purchase a subscription at [Rainfall Studio](https://rainfall-studio.pragma-digital.com)
 
 [![npm version](https://badge.fury.io/js/@rainfall%2Fsdk.svg)](https://www.npmjs.com/package/@rainfall/sdk)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 ## Features
 
-- **200+ Tools** - GitHub, Notion, Linear, Slack, Figma, Stripe, and more
-- **Semantic Memory** - Store and recall information with vector search
-- **Web Search** - Exa and Perplexity integration
-- **AI Tools** - Embeddings, image generation, OCR, vision, chat
-- **Data Processing** - CSV, scripts, similarity search
-- **Developer Friendly** - TypeScript, retry logic, error handling
-- **MCP Support** - Use with Claude, Cursor, and other AI assistants
+Note: *Some* integrations need credentials (bot tokens, access tokens, etc). Currently, groq compound mini and exa are offered via subscription. Why add your own keys? Mostly so you can build workflows that execute in the cloud.
 
-## Installation
+- **Integrations** - GitHub, Notion, Linear, Slack, Figma, Stripe. We use the same nodes that we offer to run our own purchase flows.
+- **Memory Tooling** - Keyword + Vector, entity relations. Uses Jina embeddings.
+- **Web Search** - Exa and Perplexity integration; also uses Groq's compound mini.
+- **AI Tools** - AI powered OCR (Mistral, included) for PDFs and images; vision tooling, OpenAI compatible endpoints
+  - And you can also run an openAI compatible API on your own computer and escalate to Rainfall for layered tool calling
+- **Data Processing** - CSV, scripts, similarity search, DuckDB features, document conversion to text/markdown and CSV
+- **Financial Tools** - Finviz quotes, SEC XBRL processing for 10-Qs, monte carlo simulations
+- **Developer Friendly** - TypeScript, retry logic, error handling
+- **MCP Support** - Use with Claude, Cursor, and other AI assistants; edit your list of tools to expose to your AI.
+
+
+## Quick Start
 
 ```bash
 npm install @rainfall-devkit/sdk
-# or
-yarn add @rainfall-devkit/sdk
-# or
-bun add @rainfall-devkit/sdk
 ```
-
-## Quick Start
 
 ```typescript
 import { Rainfall } from '@rainfall-devkit/sdk';

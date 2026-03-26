@@ -235,3 +235,49 @@ export namespace Utils {
     monteCarlo(params: { iterations?: number; formula: string; variables?: Record<string, { mean: number; stdDev: number }> }): Promise<unknown>;
   }
 }
+
+export namespace Charts {
+  export interface FinvizCandle {
+    Date: string;
+    Open: number;
+    High: number;
+    Low: number;
+    Close: number;
+    Volume: number;
+  }
+
+  export interface ChartRenderOptions {
+    width?: number;
+    height?: number;
+    title?: string;
+    theme?: 'default' | 'dracula' | 'catppuccin' | 'solarized' | 'nord' | 'gruvbox';
+    showVolume?: boolean;
+    overlay?: 'sma' | 'ema' | 'none';
+    overlayPeriod?: number;
+  }
+
+  export interface FinvizClient {
+    /** Get raw finviz data for a ticker */
+    get(ticker: string): Promise<FinvizCandle[]>;
+    /** Render a candlestick chart for a ticker */
+    candlestick(ticker: string, options?: ChartRenderOptions): Promise<string>;
+    /** Render a line chart for a ticker */
+    line(ticker: string, options?: ChartRenderOptions): Promise<string>;
+    /** Quick chart - renders and prints to console */
+    quick(ticker: string, options?: ChartRenderOptions): Promise<void>;
+  }
+
+  export interface RenderClient {
+    /** Render a candlestick chart from custom data */
+    candlestick(data: Array<{ open: number; high: number; low: number; close: number; volume?: number }>, title?: string, options?: ChartRenderOptions): string;
+    /** Render a line chart from custom data */
+    line(data: Array<{ x: number; y: number }>, title?: string, options?: ChartRenderOptions): string;
+  }
+
+  export interface ChartsClient {
+    /** Finviz stock data and charting */
+    finviz: FinvizClient;
+    /** General chart rendering from custom data */
+    render: RenderClient;
+  }
+}

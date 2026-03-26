@@ -70,6 +70,7 @@ export type {
   AI,
   Data,
   Utils,
+  Charts,
 } from './types.js';
 
 // Version

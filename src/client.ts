@@ -41,11 +41,29 @@ export class RainfallClient {
     this.disableValidation = config.disableValidation ?? false;
   }
 
+  apiFetch(route: string, options?: RequestInit) {
+    const { headers, ...rest } = options || {};
+    return fetch(`${this.baseUrl}/${route}`, {
+      ...rest,
+      headers: {
+        'x-api-key': this.apiKey,
+        ...headers,
+      }
+    });
+  }
+
   /**
    * Get the last rate limit info from the API
    */
   getRateLimitInfo(): RateLimitInfo | undefined {
     return this.lastRateLimitInfo;
+  }
+
+  /**
+   * Get the base URL for the API
+   */
+  getBaseUrl(): string {
+    return this.baseUrl;
   }
 
   /**

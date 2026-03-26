@@ -11,7 +11,8 @@ import { createWeb } from './namespaces/web.js';
 import { createAI } from './namespaces/ai.js';
 import { createData } from './namespaces/data.js';
 import { createUtils } from './namespaces/utils.js';
-import type { Memory, Articles, Web, AI, Data, Utils } from './types.js';
+import { createCharts } from './namespaces/charts.js';
+import type { Memory, Articles, Web, AI, Data, Utils, Charts } from './types.js';
 
 export class Rainfall {
   private readonly client: RainfallClient;
@@ -22,6 +23,7 @@ export class Rainfall {
   private _ai?: AI.AIClient;
   private _data?: Data.DataClient;
   private _utils?: Utils.UtilsClient;
+  private _charts?: Charts.ChartsClient;
 
   constructor(config: RainfallConfig) {
     this.client = new RainfallClient(config);
@@ -220,6 +222,40 @@ export class Rainfall {
       this._utils = createUtils(this.client);
     }
     return this._utils;
+  }
+
+  /**
+   * Charts namespace - Terminal-based chart rendering with finviz data
+   *
+   * @example
+   * ```typescript
+   * // Get finviz data for a ticker
+   * const candles = await rainfall.charts.finviz.get('AAPL');
+   *
+   * // Render a candlestick chart
+   * const chart = await rainfall.charts.finviz.candlestick('AAPL', {
+   *   width: 100,
+   *   height: 30,
+   *   theme: 'dracula'
+   * });
+   * console.log(chart);
+   *
+   * // Quick chart (prints directly)
+   * await rainfall.charts.finviz.quick('TSLA');
+   *
+   * // Render custom data
+   * const customChart = rainfall.charts.render.line([
+   *   { x: 0, y: 10 },
+   *   { x: 1, y: 15 },
+   *   { x: 2, y: 12 }
+   * ], 'Custom Data');
+   * ```
+   */
+  get charts(): Charts.ChartsClient {
+    if (!this._charts) {
+      this._charts = createCharts(this.client);
+    }
+    return this._charts;
   }
 
   /**
