@@ -174,21 +174,31 @@ function authLogout(): void {
 
 async function authStatus(): Promise<void> {
   const config = loadConfig();
-  
+  const defaultBaseUrl = 'https://olympic-api.pragma-digital.org/v1';
+
   if (!config.apiKey) {
     console.log('Not authenticated');
     console.log('Run: rainfall auth login <api-key>');
     return;
   }
 
+  // Show custom baseUrl if set (for debugging)
+  if (config.baseUrl && config.baseUrl !== defaultBaseUrl) {
+    console.log(`API URL: ${config.baseUrl} (custom)`);
+  }
+
   try {
-    const rainfall = new Rainfall({ apiKey: config.apiKey });
+    // Use configured baseUrl for validation if set
+    const rainfall = new Rainfall({ apiKey: config.apiKey, baseUrl: config.baseUrl });
     const me = await rainfall.getMe();
     console.log(`Authenticated as ${me.name || me.email || 'Unknown'}`);
     console.log(`Plan: ${me.billingStatus || me.plan || 'N/A'}`);
     console.log(`Usage: ${me.usage?.callsThisMonth?.toLocaleString() || 0} / ${me.usage?.callsLimit?.toLocaleString() || 'Unlimited'} calls this month`);
   } catch (error) {
     console.log('Authentication expired or invalid');
+    if (config.baseUrl && config.baseUrl !== defaultBaseUrl) {
+      console.log(`Note: Using custom URL ${config.baseUrl} - is it running?`);
+    }
     console.log('Run: rainfall auth login <api-key>');
   }
 }
