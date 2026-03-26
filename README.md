@@ -64,7 +64,7 @@ We’re just getting started. Usage-based metering, higher tiers, desktop app, a
 
 Thanks for betting on us.
 
-— Fall (@Teleolurian)
+— Fall
 
 ---
 
