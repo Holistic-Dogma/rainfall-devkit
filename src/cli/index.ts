@@ -26,7 +26,8 @@ Commands:
   auth login                    Store API key
   auth logout                   Remove stored API key
   auth status                   Check authentication status
-  auth google                   Authenticate with Google (for Drive, Sheets, Gmail)
+  auth google                   Authenticate with Google (Drive, Sheets, Docs)
+  auth google --gmail           Authenticate with Google (includes Gmail access)
   auth google-logout            Remove Google authentication
   
   tools list                    List all available tools
@@ -213,7 +214,21 @@ async function authStatus(): Promise<void> {
     console.log(`Google: ${expired ? '⚠️ Token expired (will auto-refresh)' : '✓ Authenticated'}`);
     if (config.googleTokens.scope) {
       const scopes = config.googleTokens.scope.split(' ');
-      console.log(`  Scopes: ${scopes.length} permissions granted`);
+      const hasGmail = scopes.some(s => s.includes('mail.google.com'));
+      const hasSheets = scopes.some(s => s.includes('spreadsheets'));
+      const hasDocs = scopes.some(s => s.includes('documents'));
+      const hasDrive = scopes.some(s => s.includes('drive'));
+      
+      console.log(`  Services: ${[
+        hasDrive && 'Drive',
+        hasSheets && 'Sheets', 
+        hasDocs && 'Docs',
+        hasGmail && 'Gmail'
+      ].filter(Boolean).join(', ') || 'Basic profile only'}`);
+      
+      if (!hasGmail) {
+        console.log(`  Note: Gmail not enabled. Run: rainfall auth google --gmail`);
+      }
     }
   } else {
     console.log('Google: Not authenticated');
@@ -276,9 +291,13 @@ and will be used automatically when running Google tools.
   
   try {
     await authenticateGoogle(requestedScopes);
-    console.log('\nYou can now use Google tools:');
+    console.log('\n✓ You can now use Google tools:');
     console.log('  rainfall run google-drive-list-files');
     console.log('  rainfall run google-sheets-get-values');
+    if (includeGmail) {
+      console.log('  rainfall run google-gmail-list-messages');
+      console.log('  rainfall run google-gmail-send-message --to "user@example.com" --subject "Hello" --body "Message"');
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.error(`\n❌ Google authentication failed: ${message}`);

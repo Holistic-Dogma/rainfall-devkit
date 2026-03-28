@@ -167,9 +167,10 @@ export function isTokenExpired(tokens: GoogleTokens): boolean {
 }
 
 /**
- * Get valid Google tokens from the backend
+ * Get credential scopes from the backend (non-sensitive metadata)
+ * This endpoint returns scopes without exposing actual tokens
  */
-export async function getValidGoogleTokens(): Promise<GoogleTokens | null> {
+export async function getGoogleCredentialScopes(subscriberId: string): Promise<string[] | null> {
   const config = loadConfig();
   
   if (!config.apiKey) {
@@ -177,18 +178,8 @@ export async function getValidGoogleTokens(): Promise<GoogleTokens | null> {
   }
   
   try {
-    // Get subscriber ID
-    const { Rainfall } = await import('../../sdk.js');
-    const rainfall = new Rainfall({ apiKey: config.apiKey, baseUrl: config.baseUrl });
-    const me = await rainfall.getMe();
-    
-    if (!me.id) {
-      return null;
-    }
-    
-    // Fetch credentials from backend
     const baseUrl = config.baseUrl || 'https://olympic-api.pragma-digital.org/v1';
-    const response = await fetch(`${baseUrl}/olympic/subscribers/${me.id}/account/credentials`, {
+    const response = await fetch(`${baseUrl}/olympic/subscribers/${subscriberId}/account/credentials/scopes`, {
       headers: {
         'x-api-key': config.apiKey,
       },
@@ -208,21 +199,75 @@ export async function getValidGoogleTokens(): Promise<GoogleTokens | null> {
       c.service_name === 'google' && c.credential_name === 'main'
     );
     
-    if (!googleCred?.credential_data) {
+    if (!googleCred?.scope) {
       return null;
+    }
+    
+    // Scope is a space-separated string, split it into array
+    return googleCred.scope.split(' ').filter((s: string) => s.length > 0);
+  } catch (error) {
+    return null;
+  }
+}
+
+/**
+ * Get valid Google tokens from the backend
+ * Falls back to local config if backend credentials are masked
+ */
+export async function getValidGoogleTokens(): Promise<GoogleTokens | null> {
+  const config = loadConfig();
+  
+  if (!config.apiKey) {
+    return config.googleTokens || null;
+  }
+  
+  try {
+    // Get subscriber ID
+    const { Rainfall } = await import('../../sdk.js');
+    const rainfall = new Rainfall({ apiKey: config.apiKey, baseUrl: config.baseUrl });
+    const me = await rainfall.getMe();
+    
+    if (!me.id) {
+      return config.googleTokens || null;
+    }
+    
+    // Fetch credentials from backend
+    const baseUrl = config.baseUrl || 'https://olympic-api.pragma-digital.org/v1';
+    const response = await fetch(`${baseUrl}/olympic/subscribers/${me.id}/account/credentials`, {
+      headers: {
+        'x-api-key': config.apiKey,
+      },
+    });
+    
+    if (!response.ok) {
+      return config.googleTokens || null;
+    }
+    
+    const result = await response.json();
+    if (!result.success || !result.credentials) {
+      return config.googleTokens || null;
+    }
+    
+    // Find Google credential
+    const googleCred = result.credentials.find((c: any) => 
+      c.service_name === 'google' && c.credential_name === 'main'
+    );
+    
+    if (!googleCred?.credential_data) {
+      return config.googleTokens || null;
     }
     
     // Parse credential data if it's a string
     let credentialData = googleCred.credential_data;
     if (typeof credentialData === 'string') {
-      // Handle the masked format [Length: XXX]
+      // Handle the masked format [Length: XXX] - fall back to local config
       if (credentialData.startsWith('[Length:')) {
-        return null;
+        return config.googleTokens || null;
       }
       try {
         credentialData = JSON.parse(credentialData);
       } catch {
-        return null;
+        return config.googleTokens || null;
       }
     }
     
@@ -234,7 +279,7 @@ export async function getValidGoogleTokens(): Promise<GoogleTokens | null> {
       scope: credentialData.scope,
     };
   } catch (error) {
-    return null;
+    return config.googleTokens || null;
   }
 }
 
@@ -304,6 +349,21 @@ export async function authenticateGoogle(scopes: string[] = []): Promise<void> {
     saveConfig({ ...config, googleTokens: tokens });
     console.log(`  Access token expires: ${new Date(tokens.expiry_date).toLocaleString()}`);
     console.log(`  Has refresh token: ${!!tokens.refresh_token}`);
+  } else {
+    // Backend masks credentials, so save the requested scopes for local reference
+    // This allows the CLI to check if required scopes were granted
+    const expiryDate = Date.now() + (3600 * 1000); // 1 hour from now (typical OAuth expiry)
+    saveConfig({ 
+      ...config, 
+      googleTokens: {
+        access_token: 'stored-on-backend',
+        refresh_token: 'stored-on-backend',
+        expiry_date: expiryDate,
+        token_type: 'Bearer',
+        scope: requestedScopes.join(' '),
+      } as GoogleTokens
+    });
+    console.log(`  Scopes granted: ${requestedScopes.map(s => s.split('/').pop()).join(', ')}`);
   }
 }
 

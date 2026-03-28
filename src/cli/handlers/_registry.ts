@@ -201,6 +201,9 @@ const memoryRecallHandler: ToolHandler = {
   },
 };
 
+// Import and register Google handler
+import { googleToolHandler } from './google.js';
+
 // Register all built-in handlers
 export function registerBuiltInHandlers(registry: ToolHandlerRegistry = globalHandlerRegistry): void {
   registry.register(imageGenerationHandler);
@@ -208,6 +211,7 @@ export function registerBuiltInHandlers(registry: ToolHandlerRegistry = globalHa
   registry.register(csvQueryHandler);
   registry.register(webSearchHandler);
   registry.register(memoryRecallHandler);
+  registry.register(googleToolHandler);
 }
 
 // Auto-register on import
