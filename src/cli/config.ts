@@ -30,6 +30,14 @@ export interface LLMConfig {
   options?: Record<string, unknown>;
 }
 
+export interface GoogleTokens {
+  access_token: string;
+  refresh_token?: string;
+  expiry_date: number;
+  token_type: string;
+  scope?: string;
+}
+
 export interface Config {
   /** Rainfall API key for tool access and credit-based LLM usage */
   apiKey?: string;
@@ -52,6 +60,8 @@ export interface Config {
   secureMode?: boolean;
   /** Registered proc node IDs for edge execution */
   procNodeIds?: string[];
+  /** Google OAuth tokens for Google Workspace integrations */
+  googleTokens?: GoogleTokens;
 }
 
 /**

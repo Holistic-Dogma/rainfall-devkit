@@ -26,6 +26,8 @@ Commands:
   auth login                    Store API key
   auth logout                   Remove stored API key
   auth status                   Check authentication status
+  auth google                   Authenticate with Google (for Drive, Sheets, Gmail)
+  auth google-logout            Remove Google authentication
   
   tools list                    List all available tools
   tools describe <tool>         Show tool schema and description
@@ -200,7 +202,93 @@ async function authStatus(): Promise<void> {
       console.log(`Note: Using custom URL ${config.baseUrl} - is it running?`);
     }
     console.log('Run: rainfall auth login <api-key>');
+    return;
   }
+
+  // Show Google auth status
+  console.log();
+  if (config.googleTokens?.access_token) {
+    const { isTokenExpired } = await import('./auth/google.js');
+    const expired = isTokenExpired(config.googleTokens);
+    console.log(`Google: ${expired ? '⚠️ Token expired (will auto-refresh)' : '✓ Authenticated'}`);
+    if (config.googleTokens.scope) {
+      const scopes = config.googleTokens.scope.split(' ');
+      console.log(`  Scopes: ${scopes.length} permissions granted`);
+    }
+  } else {
+    console.log('Google: Not authenticated');
+    console.log('Run: rainfall auth google');
+  }
+}
+
+async function authGoogle(args: string[]): Promise<void> {
+  const { authenticateGoogle, GOOGLE_SCOPES } = await import('./auth/google.js');
+  
+  // Parse scope options
+  const scopes: string[] = [];
+  let includeGmail = false;
+  
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === '--gmail' || arg === '-g') {
+      includeGmail = true;
+    } else if (arg === '--scopes' || arg === '-s') {
+      const scopeList = args[++i];
+      if (scopeList) {
+        scopes.push(...scopeList.split(','));
+      }
+    } else if (arg === '--help' || arg === '-h') {
+      console.log(`
+Usage: rainfall auth google [options]
+
+Authenticate with Google to use Google Workspace tools (Drive, Sheets, Docs, Gmail).
+
+Options:
+  --gmail, -g          Include Gmail access (requires additional scope)
+  --scopes <list>      Custom comma-separated scopes
+  --help               Show this help
+
+Examples:
+  rainfall auth google                    # Basic auth (Drive, Sheets, Docs)
+  rainfall auth google --gmail            # Include Gmail access
+  rainfall auth google --scopes "https://www.googleapis.com/auth/calendar"
+
+After authentication, your tokens are stored securely in ~/.rainfall/config.json
+and will be used automatically when running Google tools.
+`);
+      return;
+    }
+  }
+  
+  // Default scopes
+  const defaultScopes = [
+    GOOGLE_SCOPES.userinfo,
+    GOOGLE_SCOPES.drive,
+    GOOGLE_SCOPES.sheets,
+    GOOGLE_SCOPES.docs,
+  ];
+  
+  if (includeGmail) {
+    defaultScopes.push(GOOGLE_SCOPES.gmail);
+  }
+  
+  const requestedScopes = scopes.length > 0 ? scopes : defaultScopes;
+  
+  try {
+    await authenticateGoogle(requestedScopes);
+    console.log('\nYou can now use Google tools:');
+    console.log('  rainfall run google-drive-list-files');
+    console.log('  rainfall run google-sheets-get-values');
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`\n❌ Google authentication failed: ${message}`);
+    process.exit(1);
+  }
+}
+
+async function authGoogleLogout(): Promise<void> {
+  const { logoutGoogle } = await import('./auth/google.js');
+  await logoutGoogle();
 }
 
 async function listTools(): Promise<void> {
@@ -1867,9 +1955,15 @@ async function main(): Promise<void> {
         case 'status':
           await authStatus();
           break;
+        case 'google':
+          await authGoogle(rest);
+          break;
+        case 'google-logout':
+          await authGoogleLogout();
+          break;
         default:
           console.error('Error: Unknown auth subcommand');
-          console.error('\nUsage: rainfall auth <login|logout|status>');
+          console.error('\nUsage: rainfall auth <login|logout|status|google|google-logout>');
           process.exit(1);
       }
       break;
