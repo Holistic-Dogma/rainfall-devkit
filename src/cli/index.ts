@@ -14,6 +14,7 @@ import { parseCliArgs, formatValueForDisplay } from './core/param-parser.js';
 import { formatResult, DisplayMode } from './core/display.js';
 import { globalHandlerRegistry } from './handlers/_registry.js';
 import type { ToolContext, PostflightContext } from './core/types.js';
+import { exposeFunction } from './edge/expose-function.js';
 
 function printHelp(): void {
   console.log(`
@@ -52,6 +53,7 @@ Commands:
   
   edge generate-keys            Generate key pair for edge node encryption
   edge register <proc-node-id>  Register a proc node for edge execution
+  edge expose-function          Expose a local function as an edge node tool
   edge status                   Show edge node security status
   
   todos init                    Initialize todo list access (mints token)
@@ -1479,6 +1481,42 @@ async function edgeStatus(): Promise<void> {
   }
 }
 
+async function edgeExposeFunction(args: string[]): Promise<void> {
+  let file: string | undefined;
+  let name: string | undefined;
+  let port = 8787;
+
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === '--file' || arg === '-f') {
+      file = args[++i];
+    } else if (arg === '--name' || arg === '-n') {
+      name = args[++i];
+    } else if (arg === '--port' || arg === '-p') {
+      const val = parseInt(args[++i], 10);
+      if (!isNaN(val)) port = val;
+    }
+  }
+
+  if (!file || !name) {
+    console.error('Error: --file and --name are required');
+    console.error('\nUsage: rainfall edge expose-function --file <path> --name <name> [--port <port>]');
+    console.error('\nExample:');
+    console.error('  rainfall edge expose-function --file ./tools/my-tool.ts --name my-tool');
+    process.exit(1);
+  }
+
+  const rainfall = getRainfall();
+
+  try {
+    await exposeFunction({ file, name, port, rainfall });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error('❌ Failed to expose function:', message);
+    process.exit(1);
+  }
+}
+
 // ============================================================================
 // Todos Commands
 // ============================================================================
@@ -2085,12 +2123,15 @@ async function main(): Promise<void> {
         case 'register':
           await edgeRegister(rest);
           break;
+        case 'expose-function':
+          await edgeExposeFunction(rest);
+          break;
         case 'status':
           await edgeStatus();
           break;
         default:
           console.error('Error: Unknown edge subcommand');
-          console.error('\nUsage: rainfall edge <generate-keys|register|status>');
+          console.error('\nUsage: rainfall edge <generate-keys|register|expose-function|status>');
           process.exit(1);
       }
       break;

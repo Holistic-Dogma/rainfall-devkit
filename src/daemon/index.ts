@@ -12,6 +12,7 @@
 
 import { WebSocketServer, WebSocket } from 'ws';
 import express, { Request, Response } from 'express';
+import { join } from 'path';
 import { Rainfall } from '../sdk.js';
 import { RainfallConfig } from '../types.js';
 import { RainfallNetworkedExecutor, NetworkedExecutorOptions } from '../services/networked.js';
@@ -100,6 +101,13 @@ interface ToolDefinition {
   };
 }
 
+export interface LocalFunctionDefinition {
+  name: string;
+  description: string;
+  schema: Record<string, unknown>;
+  execute: (params: Record<string, unknown>) => Promise<unknown>;
+}
+
 export interface DaemonConfig {
   port?: number;
   openaiPort?: number;
@@ -123,6 +131,7 @@ export interface DaemonStatus {
   port?: number;
   openaiPort?: number;
   toolsLoaded: number;
+  localFunctionsLoaded?: number;
   mcpClients?: number;
   mcpTools?: number;
   clientsConnected: number;
@@ -149,6 +158,7 @@ export class RainfallDaemon {
   private rainfallConfig?: RainfallConfig;
   private tools: Array<{ id: string; name: string; description: string; category: string }> = [];
   private toolSchemas: Map<string, unknown> = new Map();
+  private localFunctions: Map<string, LocalFunctionDefinition> = new Map();
   private clients: Set<WebSocket> = new Set();
   private debug: boolean;
 
@@ -563,6 +573,15 @@ export class RainfallDaemon {
   private async getMCPTools(): Promise<unknown[]> {
     const mcpTools: unknown[] = [];
 
+    // Add local functions first
+    for (const localFn of this.localFunctions.values()) {
+      mcpTools.push({
+        name: localFn.name,
+        description: localFn.description,
+        inputSchema: localFn.schema,
+      });
+    }
+
     // Add Rainfall tools
     for (const tool of this.tools) {
       const schema = await this.getToolSchema(tool.id);
@@ -604,13 +623,19 @@ export class RainfallDaemon {
   }
 
   /**
-   * Execute a tool, trying MCP proxy first, then falling back to Rainfall tools
+   * Execute a tool, trying local functions first, then MCP proxy, then Rainfall tools
    */
   private async executeToolWithMCP(
     toolName: string, 
     params?: Record<string, unknown>
   ): Promise<unknown> {
-    // First, try to execute via MCP proxy if enabled
+    // First, try local functions
+    const localFn = this.localFunctions.get(toolName);
+    if (localFn) {
+      return localFn.execute(params || {});
+    }
+
+    // Next, try to execute via MCP proxy if enabled
     if (this.mcpProxy) {
       try {
         // Check if this is a namespaced tool (e.g., "chrome-take_screenshot")
@@ -926,9 +951,52 @@ export class RainfallDaemon {
       res.json({ success: true });
     });
 
+    // Admin endpoint: load a local function
+    this.openaiApp.post('/admin/load-local-function', async (req: Request, res: Response) => {
+      const { filePath, name } = req.body;
+
+      if (!filePath || !name) {
+        res.status(400).json({ error: 'Missing required fields: filePath, name' });
+        return;
+      }
+
+      try {
+        await this.loadLocalFunction(filePath, name);
+        res.json({ success: true, name, loaded: true });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        res.status(500).json({ error: message });
+      }
+    });
+
     // Status endpoint with full daemon info
     this.openaiApp.get('/status', (_req: Request, res: Response) => {
       res.json(this.getStatus());
+    });
+
+    // Execute tool directly (for local functions and Rainfall tools)
+    this.openaiApp.post('/v1/execute', async (req: Request, res: Response) => {
+      const { tool_id, params } = req.body;
+
+      if (!tool_id) {
+        res.status(400).json({ error: 'Missing required field: tool_id' });
+        return;
+      }
+
+      if (!this.rainfall) {
+        res.status(503).json({ error: 'Rainfall SDK not initialized' });
+        return;
+      }
+
+      try {
+        const result = await this.executeLocalTool(tool_id, params || {});
+        res.json({ success: true, result });
+      } catch (error) {
+        res.status(500).json({
+          success: false,
+          error: error instanceof Error ? error.message : 'Tool execution failed'
+        });
+      }
     });
 
     // Queue job endpoint for distributed execution
@@ -1013,9 +1081,114 @@ export class RainfallDaemon {
   }
 
   /**
+   * Load a local function module from disk
+   */
+  async loadLocalFunction(filePath: string, expectedName?: string): Promise<LocalFunctionDefinition> {
+    if (!this.rainfall) {
+      throw new Error('Rainfall SDK not initialized');
+    }
+
+    const { resolve } = await import('path');
+    const { existsSync } = await import('fs');
+    const { execSync } = await import('child_process');
+    const { mkdtempSync, writeFileSync } = await import('fs');
+    const { tmpdir } = await import('os');
+
+    const resolvedPath = resolve(filePath);
+    if (!existsSync(resolvedPath)) {
+      throw new Error(`File not found: ${resolvedPath}`);
+    }
+
+    let jsPath = resolvedPath;
+
+    // If it's a TypeScript file, transpile it with bun
+    if (resolvedPath.endsWith('.ts')) {
+      const tempDir = mkdtempSync(join(tmpdir(), 'rainfall-local-'));
+      jsPath = join(tempDir, 'function.js');
+      try {
+        execSync(`bun build "${resolvedPath}" --outfile "${jsPath}" --target node`, {
+          stdio: 'pipe',
+          timeout: 30000,
+        });
+      } catch (error) {
+        throw new Error(`Failed to transpile ${resolvedPath}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
+    // Clear require cache so reloads pick up changes
+    delete require.cache[require.resolve(jsPath)];
+    const module = require(jsPath);
+    const factory = module.default || module;
+
+    if (typeof factory !== 'function') {
+      throw new Error(`Module at ${resolvedPath} must export a default function`);
+    }
+
+    const definition = factory({ rainfall: this.rainfall });
+
+    if (!definition || typeof definition !== 'object') {
+      throw new Error(`Factory must return an object with { name, description, schema, execute }`);
+    }
+
+    const { name, description, schema, execute } = definition;
+
+    if (!name || typeof name !== 'string') {
+      throw new Error(`Local function must have a string 'name'`);
+    }
+
+    if (expectedName && name !== expectedName) {
+      throw new Error(`Function name mismatch: expected "${expectedName}", got "${name}"`);
+    }
+
+    if (!description || typeof description !== 'string') {
+      throw new Error(`Local function must have a string 'description'`);
+    }
+
+    if (!schema || typeof schema !== 'object') {
+      throw new Error(`Local function must have an object 'schema'`);
+    }
+
+    if (typeof execute !== 'function') {
+      throw new Error(`Local function must have an 'execute' function`);
+    }
+
+    const localFn: LocalFunctionDefinition = { name, description, schema, execute };
+    this.localFunctions.set(name, localFn);
+
+    // Register this function as a proc node with the backend
+    if (this.networkedExecutor) {
+      try {
+        await this.networkedExecutor.registerProcNodes([name]);
+        this.log(`🌐 Registered local function as proc node: ${name}`);
+      } catch (error) {
+        this.log(`⚠️ Failed to register proc node for ${name}:`, error);
+      }
+    }
+
+    this.log(`📦 Loaded local function: ${name}`);
+    return localFn;
+  }
+
+  /**
    * Execute a local Rainfall tool
    */
   private async executeLocalTool(toolId: string, args: Record<string, unknown>): Promise<unknown> {
+    // Check local functions first
+    const localFn = this.localFunctions.get(toolId);
+    if (localFn) {
+      const startTime = Date.now();
+      try {
+        const result = await localFn.execute(args);
+        const duration = Date.now() - startTime;
+        this.log(`  ✓ Local function ${toolId} completed in ${duration}ms`);
+        return result;
+      } catch (error) {
+        const duration = Date.now() - startTime;
+        this.log(`  ✗ Local function ${toolId} failed after ${duration}ms`);
+        throw error;
+      }
+    }
+
     if (!this.rainfall) {
       throw new Error('Rainfall SDK not initialized');
     }
@@ -1353,6 +1526,7 @@ export class RainfallDaemon {
       port: this.port,
       openaiPort: this.openaiPort,
       toolsLoaded: this.tools.length,
+      localFunctionsLoaded: this.localFunctions.size,
       clientsConnected: this.clients.size,
       edgeNodeId: this.networkedExecutor?.getEdgeNodeId(),
       context: this.context?.getStatus() || {

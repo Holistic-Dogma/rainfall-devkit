@@ -359,6 +359,37 @@ export class RainfallNetworkedExecutor {
   }
 
   /**
+   * Register additional proc nodes for this edge node
+   */
+  async registerProcNodes(procNodeIds: string[]): Promise<void> {
+    if (!this.edgeNodeId) {
+      throw new Error('Edge node not registered');
+    }
+
+    try {
+      const result = await this.rainfall.executeTool<{
+        success: boolean;
+        edgeNodeId: string;
+        edgeNodeSecret?: string;
+        registeredProcNodes: string[];
+      }>('register-proc-edge-nodes', {
+        edgeNodeId: this.edgeNodeId,
+        procNodeIds,
+        hostname: this.options.hostname,
+      });
+
+      if (!result.success) {
+        throw new Error('Backend returned unsuccessful registration');
+      }
+
+      console.log(`🌐 Registered proc nodes: ${procNodeIds.join(', ')}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(`Failed to register proc nodes: ${message}`);
+    }
+  }
+
+  /**
    * Get this edge node's ID
    */
   getEdgeNodeId(): string | undefined {
