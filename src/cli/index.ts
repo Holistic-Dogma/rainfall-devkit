@@ -56,6 +56,10 @@ Commands:
   edge expose-function          Expose a local function as an edge node tool
   edge status                   Show edge node security status
   
+  task add <name>               Add a new structured task
+  task list                     List all tasks
+  task rm <id-or-name>          Remove a task
+  
   todos init                    Initialize todo list access (mints token)
   todos init --show-token       Initialize and display token for sharing
   todos token                   Show existing todo token
@@ -1209,6 +1213,10 @@ async function daemonStatus(): Promise<void> {
   console.log(`  File watchers: ${status.listeners.fileWatchers}`);
   console.log(`  Cron triggers: ${status.listeners.cronTriggers}`);
   console.log(`  Recent events: ${status.listeners.recentEvents}`);
+  console.log();
+  console.log('Tasks:');
+  console.log(`  Poller running: ${status.tasks?.isRunning ? 'yes' : 'no'}`);
+  console.log(`  Active tasks: ${status.tasks?.activeTasks || 0}/${status.tasks?.maxConcurrent || 3}`);
 }
 
 // Workflow commands
@@ -1994,6 +2002,345 @@ async function todosToken(): Promise<void> {
   console.log("You can also pass the token as an x-todo-token header to the API.")
 }
 
+// ============================================================================
+// Task Commands (Structured Job Queue)
+// ============================================================================
+
+interface Task {
+  id: string;
+  subscriber_id: string;
+  task_name: string;
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
+  schedule?: string;
+  prompt?: string;
+  agent_config?: Record<string, unknown>;
+  task_config?: Record<string, unknown>;
+  permissions?: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
+  visibility: 'private' | 'unlisted' | 'listed';
+  namespace?: string;
+  created_at: string;
+  updated_at: string;
+  started_at?: string;
+  completed_at?: string;
+  result?: Record<string, unknown>;
+  error?: string;
+}
+
+async function taskAdd(args: string[]): Promise<void> {
+  const rainfall = getRainfall();
+  
+  // Parse arguments
+  let taskName = '';
+  let config: Record<string, unknown> = {};
+  let agentConfig: Record<string, unknown> = {};
+  let permissions: Record<string, unknown> = {};
+  let schedule: string | undefined;
+  let prompt: string | undefined;
+  let visibility = 'private';
+  let namespace = 'default';
+  
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === '--config' || arg === '-c') {
+      const json = args[++i];
+      if (json) {
+        try {
+          config = JSON.parse(json);
+        } catch {
+          console.error('❌ Invalid JSON for --config');
+          process.exit(1);
+        }
+      }
+    } else if (arg === '--agent-config' || arg === '-a') {
+      const json = args[++i];
+      if (json) {
+        try {
+          agentConfig = JSON.parse(json);
+        } catch {
+          console.error('❌ Invalid JSON for --agent-config');
+          process.exit(1);
+        }
+      }
+    } else if (arg === '--permissions' || arg === '-p') {
+      const json = args[++i];
+      if (json) {
+        try {
+          permissions = JSON.parse(json);
+        } catch {
+          console.error('❌ Invalid JSON for --permissions');
+          process.exit(1);
+        }
+      }
+    } else if (arg === '--schedule' || arg === '-s') {
+      schedule = args[++i];
+    } else if (arg === '--prompt') {
+      prompt = args[++i];
+    } else if (arg === '--visibility' || arg === '-v') {
+      visibility = args[++i] || 'private';
+    } else if (arg === '--namespace' || arg === '-n') {
+      namespace = args[++i] || 'default';
+    } else if (!taskName && !arg.startsWith('-')) {
+      taskName = arg;
+    }
+  }
+  
+  if (!taskName) {
+    console.error('❌ Task name required');
+    console.error('\nUsage: rainfall task add <task-name> [options]');
+    console.error('\nOptions:');
+    console.error('  --config, -c <json>       Task-specific parameters (JSON)');
+    console.error('  --agent-config, -a <json> Agent configuration (JSON)');
+    console.error('  --permissions, -p <json>  Security permissions (JSON)');
+    console.error('  --schedule, -s <cron>     Cron expression or timestamp');
+    console.error('  --prompt <text>           Natural language prompt');
+    console.error('  --visibility, -v <type>   private|unlisted|listed (default: private)');
+    console.error('  --namespace, -n <name>    Memory namespace (default: default)');
+    console.error('\nExample:');
+    console.error('  rainfall task add "process taxes" --config \'{ "folderPath": "/Users/fall/taxes" }\' --schedule "daily 8am"');
+    process.exit(1);
+  }
+  
+  try {
+    // Get subscriber info
+    const meResult = await rainfall.getClient().request<{
+      success: boolean;
+      subscriber?: { id: string; name: string };
+      error?: string;
+    }>('/olympic/subscribers/me', {
+      method: 'GET'
+    });
+    
+    if (!meResult.success || !meResult.subscriber) {
+      console.error('❌ Failed to get subscriber info:', meResult.error || 'Unknown error');
+      process.exit(1);
+    }
+    
+    const subscriberId = meResult.subscriber.id;
+    
+    // Create task via API
+    const result = await rainfall.getClient().request<{
+      success: boolean;
+      task?: Task;
+      error?: string;
+    }>(`/olympic/subscribers/${subscriberId}/tasks`, {
+      method: 'POST',
+      body: {
+        task_name: taskName,
+        config,
+        agent_config: agentConfig,
+        permissions,
+        schedule,
+        prompt,
+        visibility,
+        namespace
+      }
+    });
+    
+    if (!result.success || !result.task) {
+      console.error('❌ Failed to create task:', result.error || 'Unknown error');
+      process.exit(1);
+    }
+    
+    console.log(`✅ Task created: ${result.task.task_name}`);
+    console.log(`   ID: ${result.task.id}`);
+    console.log(`   Status: ${result.task.status}`);
+    console.log(`   Visibility: ${result.task.visibility}`);
+    if (schedule) {
+      console.log(`   Schedule: ${schedule}`);
+    }
+    console.log(`\nThe daemon will pick up this task and execute it.`);
+    console.log('Run `rainfall task list` to see all tasks.');
+    
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error('❌ Failed to create task:', message);
+    process.exit(1);
+  }
+}
+
+async function taskList(args: string[]): Promise<void> {
+  const rainfall = getRainfall();
+  
+  // Parse options
+  let status: string | undefined;
+  let visibility: string | undefined;
+  let taskName: string | undefined;
+  let namespace: string | undefined;
+  
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === '--status') {
+      status = args[++i];
+    } else if (arg === '--visibility' || arg === '-v') {
+      visibility = args[++i];
+    } else if (arg === '--name') {
+      taskName = args[++i];
+    } else if (arg === '--namespace' || arg === '-n') {
+      namespace = args[++i];
+    }
+  }
+  
+  try {
+    // Get subscriber info
+    const meResult = await rainfall.getClient().request<{
+      success: boolean;
+      subscriber?: { id: string; name: string };
+      error?: string;
+    }>('/olympic/subscribers/me', {
+      method: 'GET'
+    });
+    
+    if (!meResult.success || !meResult.subscriber) {
+      console.error('❌ Failed to get subscriber info:', meResult.error || 'Unknown error');
+      process.exit(1);
+    }
+    
+    const subscriberId = meResult.subscriber.id;
+    
+    // Build query params
+    const queryParams = new URLSearchParams();
+    if (status) queryParams.set('status', status);
+    if (visibility) queryParams.set('visibility', visibility);
+    if (taskName) queryParams.set('task_name', taskName);
+    if (namespace) queryParams.set('namespace', namespace);
+    
+    // Fetch tasks
+    const result = await rainfall.getClient().request<{
+      success: boolean;
+      items?: Task[];
+      error?: string;
+    }>(`/olympic/subscribers/${subscriberId}/tasks?${queryParams.toString()}`, {
+      method: 'GET'
+    });
+    
+    if (!result.success) {
+      console.error('❌ Failed to fetch tasks:', result.error || 'Unknown error');
+      process.exit(1);
+    }
+    
+    const items = result.items || [];
+    
+    if (items.length === 0) {
+      console.log('No tasks found.');
+      console.log('\nAdd your first task:');
+      console.log('  rainfall task add "my-task" --config \'{ "key": "value" }\'');
+      return;
+    }
+    
+    // Count by status
+    const pending = items.filter(t => t.status === 'pending').length;
+    const running = items.filter(t => t.status === 'running').length;
+    const completed = items.filter(t => t.status === 'completed').length;
+    const failed = items.filter(t => t.status === 'failed').length;
+    
+    console.log(`📋 Tasks (${items.length} total: ${pending} pending, ${running} running, ${completed} completed, ${failed} failed)\n`);
+    
+    // Group by status
+    const byStatus = items.reduce((acc, task) => {
+      const stat = task.status || 'unknown';
+      if (!acc[stat]) acc[stat] = [];
+      acc[stat].push(task);
+      return acc;
+    }, {} as Record<string, Task[]>);
+    
+    const statusOrder = ['running', 'pending', 'completed', 'failed', 'cancelled'];
+    
+    for (const stat of statusOrder) {
+      const tasks = byStatus[stat];
+      if (!tasks || tasks.length === 0) continue;
+      
+      console.log(`${stat}:`);
+      for (const task of tasks) {
+        const id = task.id.slice(0, 8);
+        const schedule = task.schedule ? ` [${task.schedule}]` : '';
+        const visibility = task.visibility !== 'listed' ? ` (${task.visibility})` : '';
+        console.log(`  [${id}] ${task.task_name}${schedule}${visibility}`);
+      }
+      console.log();
+    }
+    
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error('❌ Failed to fetch tasks:', message);
+    process.exit(1);
+  }
+}
+
+async function taskRemove(args: string[]): Promise<void> {
+  const rainfall = getRainfall();
+  
+  const query = args[0];
+  if (!query) {
+    console.error('❌ Remove what? Provide an ID or task name.');
+    console.error('\nUsage: rainfall task rm <id-or-name>');
+    process.exit(1);
+  }
+  
+  try {
+    // Get subscriber info
+    const meResult = await rainfall.getClient().request<{
+      success: boolean;
+      subscriber?: { id: string; name: string };
+      error?: string;
+    }>('/olympic/subscribers/me', {
+      method: 'GET'
+    });
+    
+    if (!meResult.success || !meResult.subscriber) {
+      console.error('❌ Failed to get subscriber info:', meResult.error || 'Unknown error');
+      process.exit(1);
+    }
+    
+    const subscriberId = meResult.subscriber.id;
+    
+    // First, try to find the task by ID or name
+    const listResult = await rainfall.getClient().request<{
+      success: boolean;
+      items?: Task[];
+    }>(`/olympic/subscribers/${subscriberId}/tasks`, {
+      method: 'GET'
+    });
+    
+    if (!listResult.success || !listResult.items) {
+      console.error('❌ Failed to fetch tasks');
+      process.exit(1);
+    }
+    
+    // Find matching task
+    const match = listResult.items.find(task => 
+      task.id.toLowerCase().startsWith(query.toLowerCase()) ||
+      task.task_name.toLowerCase() === query.toLowerCase()
+    );
+    
+    if (!match) {
+      console.error(`❌ No task found matching "${query}"`);
+      console.error('\nRun `rainfall task list` to see your tasks.');
+      process.exit(1);
+    }
+    
+    // Delete the task
+    const result = await rainfall.getClient().request<{
+      success: boolean;
+      error?: string;
+    }>(`/olympic/subscribers/${subscriberId}/tasks/${match.id}`, {
+      method: 'DELETE'
+    });
+    
+    if (!result.success) {
+      console.error('❌ Failed to remove task:', result.error);
+      process.exit(1);
+    }
+    
+    console.log(`🗑️  Removed task: "${match.task_name}"`);
+    
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error('❌ Failed to remove task:', message);
+    process.exit(1);
+  }
+}
+
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const command = args[0];
@@ -2132,6 +2479,30 @@ async function main(): Promise<void> {
         default:
           console.error('Error: Unknown edge subcommand');
           console.error('\nUsage: rainfall edge <generate-keys|register|expose-function|status>');
+          process.exit(1);
+      }
+      break;
+
+    case 'task':
+      switch (subcommand) {
+        case 'add':
+          await taskAdd(rest);
+          break;
+        case 'list':
+          await taskList(rest);
+          break;
+        case 'rm':
+        case 'remove':
+          await taskRemove(rest);
+          break;
+        default:
+          console.error('Error: Unknown task subcommand');
+          console.error('\nUsage: rainfall task <add|list|rm>');
+          console.error('\nExamples:');
+          console.error('  rainfall task add "process taxes" --config \'{ "folderPath": "/Users/fall/taxes" }\' --schedule "daily 8am"');
+          console.error('  rainfall task list');
+          console.error('  rainfall task list --status pending');
+          console.error('  rainfall task rm "process taxes"');
           process.exit(1);
       }
       break;

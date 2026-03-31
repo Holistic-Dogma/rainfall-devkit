@@ -19,6 +19,7 @@ import { RainfallNetworkedExecutor, NetworkedExecutorOptions } from '../services
 import { RainfallDaemonContext, ContextOptions } from '../services/context.js';
 import { RainfallListenerRegistry } from '../services/listeners.js';
 import { MCPProxyHub, MCPClientConfig } from '../services/mcp-proxy.js';
+import { TaskPoller, TaskPollerConfig } from '../services/task-poller.js';
 
 // MCP message types
 interface MCPMessage {
@@ -147,6 +148,11 @@ export interface DaemonStatus {
     cronTriggers: number;
     recentEvents: number;
   };
+  tasks: {
+    isRunning: boolean;
+    activeTasks: number;
+    maxConcurrent: number;
+  };
 }
 
 export class RainfallDaemon {
@@ -167,6 +173,7 @@ export class RainfallDaemon {
   private context?: RainfallDaemonContext;
   private listeners?: RainfallListenerRegistry;
   private mcpProxy?: MCPProxyHub;
+  private taskPoller?: TaskPoller;
   private enableMcpProxy: boolean;
   private mcpNamespacePrefix: boolean;
 
@@ -284,6 +291,20 @@ export class RainfallDaemon {
       }
     }
 
+    // Initialize task poller for structured job queue
+    this.taskPoller = new TaskPoller(
+      this.rainfall,
+      this.localFunctions as unknown as Map<string, { execute: (context: unknown) => Promise<Record<string, unknown>> }>,
+      {
+        pollInterval: 5000,
+        maxConcurrent: 3,
+        debug: this.debug,
+      }
+    );
+    await this.taskPoller.initialize();
+    this.taskPoller.start();
+    this.log('📋 Task poller started');
+
     // Start WebSocket server for MCP
     await this.startWebSocketServer();
 
@@ -315,6 +336,11 @@ export class RainfallDaemon {
     // Stop job polling
     if (this.networkedExecutor) {
       this.networkedExecutor.stopJobPolling();
+    }
+
+    // Stop task poller
+    if (this.taskPoller) {
+      this.taskPoller.stop();
     }
 
     // Unregister edge node
@@ -1538,6 +1564,11 @@ export class RainfallDaemon {
         fileWatchers: 0,
         cronTriggers: 0,
         recentEvents: 0,
+      },
+      tasks: this.taskPoller?.getStatus() || {
+        isRunning: false,
+        activeTasks: 0,
+        maxConcurrent: 3,
       },
     };
   }

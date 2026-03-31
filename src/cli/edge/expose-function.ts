@@ -119,12 +119,14 @@ export async function exposeFunction(options: ExposeFunctionOptions): Promise<Ex
       hostname: process.env.HOSTNAME || 'local-edge',
       capabilities: [name],
       version: '1.0.0',
+      visibility: 'private',
       metadata: {
         source: 'rainfall-devkit-cli',
       },
     });
     edgeNodeId = registerResult.edgeNodeId;
     console.log(`   Edge node registered: ${edgeNodeId}`);
+    console.log(`   Visibility: private`);
   } else {
     console.log(`   Using existing edge node: ${edgeNodeId}`);
   }
