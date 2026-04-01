@@ -932,6 +932,7 @@ export class RainfallDaemon {
         daemon: 'rainfall',
         version: '0.2.0',
         tools_loaded: this.tools.length,
+        local_functions: Array.from(this.localFunctions.keys()),
         mcp_clients: mcpStats?.totalClients || 0,
         mcp_tools: mcpStats?.totalTools || 0,
         edge_node_id: this.networkedExecutor?.getEdgeNodeId(),
@@ -979,7 +980,7 @@ export class RainfallDaemon {
 
     // Admin endpoint: load a local function
     this.openaiApp.post('/admin/load-local-function', async (req: Request, res: Response) => {
-      const { filePath, name } = req.body;
+      const { filePath, name, description, schema } = req.body;
 
       if (!filePath || !name) {
         res.status(400).json({ error: 'Missing required fields: filePath, name' });
@@ -987,7 +988,7 @@ export class RainfallDaemon {
       }
 
       try {
-        await this.loadLocalFunction(filePath, name);
+        await this.loadLocalFunction(filePath, name, description, schema);
         res.json({ success: true, name, loaded: true });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -1109,7 +1110,12 @@ export class RainfallDaemon {
   /**
    * Load a local function module from disk
    */
-  async loadLocalFunction(filePath: string, expectedName?: string): Promise<LocalFunctionDefinition> {
+  async loadLocalFunction(
+    filePath: string, 
+    expectedName?: string,
+    providedDescription?: string,
+    providedSchema?: Record<string, unknown>
+  ): Promise<LocalFunctionDefinition> {
     if (!this.rainfall) {
       throw new Error('Rainfall SDK not initialized');
     }
@@ -1166,11 +1172,15 @@ export class RainfallDaemon {
       throw new Error(`Function name mismatch: expected "${expectedName}", got "${name}"`);
     }
 
-    if (!description || typeof description !== 'string') {
+    // Use provided description/schema if available (from CLI), otherwise use from module
+    const finalDescription = providedDescription || description;
+    const finalSchema = providedSchema || schema;
+
+    if (!finalDescription || typeof finalDescription !== 'string') {
       throw new Error(`Local function must have a string 'description'`);
     }
 
-    if (!schema || typeof schema !== 'object') {
+    if (!finalSchema || typeof finalSchema !== 'object') {
       throw new Error(`Local function must have an object 'schema'`);
     }
 
@@ -1178,7 +1188,12 @@ export class RainfallDaemon {
       throw new Error(`Local function must have an 'execute' function`);
     }
 
-    const localFn: LocalFunctionDefinition = { name, description, schema, execute };
+    const localFn: LocalFunctionDefinition = { 
+      name, 
+      description: finalDescription, 
+      schema: finalSchema, 
+      execute 
+    };
     this.localFunctions.set(name, localFn);
 
     // Register this function as a proc node with the backend
@@ -1203,6 +1218,8 @@ export class RainfallDaemon {
     const localFn = this.localFunctions.get(toolId);
     if (localFn) {
       const startTime = Date.now();
+      this.log(`  → Executing local function: ${toolId}`);
+      this.log(`    Args: ${JSON.stringify(args)}`);
       try {
         const result = await localFn.execute(args);
         const duration = Date.now() - startTime;

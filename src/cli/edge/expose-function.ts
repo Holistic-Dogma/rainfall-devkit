@@ -2,7 +2,7 @@
  * rainfall edge expose-function
  *
  * Loads a local TS/JS file exporting `default ({ rainfall }) => ({ name, description, schema, execute })`,
- * validates the shape, registers it as an edge proc node, and tells the running daemon to load it.
+ * validates the shape, tells the running daemon to load it, and registers the schema centrally.
  */
 
 import { Rainfall } from '../../sdk.js';
@@ -98,73 +98,108 @@ function loadAndValidate(filePath: string, rainfall: Rainfall, expectedName: str
 
 export async function exposeFunction(options: ExposeFunctionOptions): Promise<ExposeFunctionResult> {
   const { file, name, port = 8787, rainfall } = options;
-  const config = loadConfig();
 
   // 1. Load and validate the local module
   console.log(`📂 Loading local function from ${file}...`);
-  loadAndValidate(file, rainfall, name);
+  const definition = loadAndValidate(file, rainfall, name);
   console.log(`✅ Validated local function: ${name}`);
 
-  // 2. Register edge node (reuse existing or create new)
-  let edgeNodeId = config.edgeNodeId;
-
-  if (!edgeNodeId) {
-    console.log('📡 Registering edge node with backend...');
-    const registerResult = await rainfall.executeTool<{
-      success: boolean;
-      edgeNodeId: string;
-      registeredAt: string;
-      expiresAt: string;
-    }>('register-edge-node', {
-      hostname: process.env.HOSTNAME || 'local-edge',
-      capabilities: [name],
-      version: '1.0.0',
-      visibility: 'private',
-      metadata: {
-        source: 'rainfall-devkit-cli',
-      },
+  // 2. Get the daemon's edge node ID from status endpoint
+  console.log('\n📡 Getting edge node info from daemon...');
+  let edgeNodeId: string;
+  try {
+    const response = await fetch(`http://localhost:${port}/health`, {
+      method: 'GET',
     });
-    edgeNodeId = registerResult.edgeNodeId;
-    console.log(`   Edge node registered: ${edgeNodeId}`);
-    console.log(`   Visibility: private`);
-  } else {
-    console.log(`   Using existing edge node: ${edgeNodeId}`);
+
+    if (!response.ok) {
+      throw new Error(`Daemon responded ${response.status}`);
+    }
+
+    const health = await response.json() as { edge_node_id?: string };
+    if (!health.edge_node_id) {
+      throw new Error('Daemon does not have an active edge node ID');
+    }
+    edgeNodeId = health.edge_node_id;
+    console.log(`   Using daemon's edge node: ${edgeNodeId}`);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Failed to get edge node info from daemon: ${message}. Make sure the daemon is running: rainfall daemon start`);
   }
 
-  // 3. Register proc node for this function
+  // 3. Register proc node for this function with the daemon's edge node ID
   console.log('\n📡 Registering proc node...');
-  const result = await rainfall.executeTool<{
+  
+  let result: {
     success: boolean;
     edgeNodeId: string;
     edgeNodeSecret: string;
     registeredProcNodes: string[];
-  }>('register-proc-edge-nodes', {
-    edgeNodeId,
-    procNodeIds: [name],
-    hostname: process.env.HOSTNAME || 'local-edge',
-  });
+  };
+  
+  try {
+    result = await rainfall.executeTool<{
+      success: boolean;
+      edgeNodeId: string;
+      edgeNodeSecret: string;
+      registeredProcNodes: string[];
+    }>('register-proc-edge-nodes', {
+      edgeNodeId,
+      procNodeIds: [name],
+      hostname: process.env.HOSTNAME || 'local-edge',
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Failed to register proc node: ${message}`);
+  }
 
   if (!result.success) {
     throw new Error('Backend returned unsuccessful registration');
   }
 
   // Store credentials
+  const config = loadConfig();
   config.edgeNodeId = result.edgeNodeId;
   config.edgeNodeSecret = result.edgeNodeSecret;
   config.edgeNodeKeysPath = join(getConfigDir(), 'keys');
+  config.procNodeIds = [...new Set([...(config.procNodeIds || []), name])];
   saveConfig(config);
 
   console.log('✅ Proc node registered successfully!');
   console.log('Edge Node ID:', result.edgeNodeId);
   console.log('Proc Node:', name);
 
-  // 4. Tell the daemon to load this local function
+  // 4. Register the schema centrally so /params and node_list can find it
+  console.log('\n📡 Registering function schema...');
+  try {
+    await rainfall.executeTool('register-node-schema', {
+      nodeId: name,
+      name,
+      description: definition.description,
+      parameters: definition.schema,
+      category: 'edge',
+      visibility: 'private',
+      edgeNodeId: result.edgeNodeId,
+    });
+    console.log('✅ Schema registered centrally');
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn(`⚠️  Failed to register schema centrally: ${message}`);
+    console.warn('   The function will still work, but /params may return blank.');
+  }
+
+  // 5. Tell the daemon to load this local function
   console.log('\n📡 Notifying daemon...');
   try {
     const response = await fetch(`http://localhost:${port}/admin/load-local-function`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ filePath: resolve(file), name }),
+      body: JSON.stringify({ 
+        filePath: resolve(file), 
+        name,
+        description: definition.description,
+        schema: definition.schema,
+      }),
     });
 
     if (!response.ok) {

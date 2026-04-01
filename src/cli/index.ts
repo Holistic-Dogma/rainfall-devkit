@@ -1338,30 +1338,36 @@ async function edgeRegister(args: string[]): Promise<void> {
   console.log(`🌐 Registering ${procNodeIds.length} proc node(s) for edge execution...\n`);
 
   try {
-    // Step 1: Register the edge node itself (or get existing)
+    // Step 1: Get the edge node ID from the running daemon
     let edgeNodeId = config.edgeNodeId;
     
-    if (!edgeNodeId) {
-      console.log('📡 Registering edge node with backend...');
-      const registerResult = await rainfall.executeTool<{ 
-        success: boolean;
-        edgeNodeId: string;
-        registeredAt: string;
-        expiresAt: string;
-      }>('register-edge-node', {
-        hostname: process.env.HOSTNAME || 'local-edge',
-        capabilities: procNodeIds,
-        version: '1.0.0',
-        metadata: {
-          publicKey: publicKey || undefined,
-          source: 'rainfall-devkit-cli',
-        },
+    // First, try to get the edge node ID from the daemon's health endpoint
+    console.log('📡 Checking daemon status...');
+    try {
+      const port = 8787; // Default daemon port
+      const response = await fetch(`http://localhost:${port}/health`, {
+        method: 'GET',
       });
-      
-      edgeNodeId = registerResult.edgeNodeId;
-      console.log(`   Edge node registered: ${edgeNodeId}`);
+
+      if (response.ok) {
+        const health = await response.json() as { edge_node_id?: string };
+        if (health.edge_node_id) {
+          edgeNodeId = health.edge_node_id;
+          console.log(`   Using daemon's edge node: ${edgeNodeId}`);
+        }
+      }
+    } catch {
+      // Daemon not running or not accessible, fall through to config
+    }
+    
+    // If we still don't have an edge node ID, we can't proceed
+    if (!edgeNodeId) {
+      console.error('❌ No edge node ID found.');
+      console.error('   Please start the daemon first: rainfall daemon start');
+      console.error('   The daemon will register itself with the backend.');
+      process.exit(1);
     } else {
-      console.log(`   Using existing edge node: ${edgeNodeId}`);
+      console.log(`   Using edge node: ${edgeNodeId}`);
     }
 
     // Step 2: Register proc nodes for this edge node
@@ -1387,9 +1393,34 @@ async function edgeRegister(args: string[]): Promise<void> {
     config.edgeNodeId = result.edgeNodeId;
     config.edgeNodeSecret = result.edgeNodeSecret;
     config.edgeNodeKeysPath = join(getConfigDir(), 'keys');
+    config.procNodeIds = [...new Set([...(config.procNodeIds || []), ...procNodeIds])];
     saveConfig(config);
 
-    console.log('✅ Proc node(s) registered successfully!\n');
+    // Register generic schemas for each proc node so /params returns something valid
+    console.log('\n📡 Registering node schemas...');
+    for (const nodeId of procNodeIds) {
+      try {
+        await rainfall.executeTool('register-node-schema', {
+          nodeId,
+          name: nodeId,
+          description: `Edge-registered proc node: ${nodeId}`,
+          parameters: {
+            type: 'object',
+            properties: {},
+            additionalProperties: true,  // Allow any parameters
+          },
+          category: 'edge',
+          visibility: 'private',
+          edgeNodeId: result.edgeNodeId,
+        });
+        console.log(`   ✅ Schema registered for ${nodeId}`);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.warn(`   ⚠️  Failed to register schema for ${nodeId}: ${message}`);
+      }
+    }
+
+    console.log('\n✅ Proc node(s) registered successfully!\n');
     console.log('Edge Node ID:', result.edgeNodeId);
     console.log('Proc Nodes Registered:');
     for (const nodeId of result.registeredProcNodes) {
@@ -1410,9 +1441,9 @@ async function edgeRegister(args: string[]): Promise<void> {
       console.error('   Make sure you are running the latest version of Rainyday.');
     }
     
-    // Handle expired edge node - clear config and suggest retry
-    if (message.includes('expired') && config.edgeNodeId) {
-      console.error('\n💡 Your edge node registration has expired.');
+    // Handle expired or not-found edge node - clear config and suggest retry
+    if ((message.includes('expired') || message.includes('not found')) && config.edgeNodeId) {
+      console.error('\n💡 Your edge node registration has expired or is not recognized by the backend.');
       console.error('   Clearing stale edge node ID from config...');
       
       // Clear the expired edge node ID

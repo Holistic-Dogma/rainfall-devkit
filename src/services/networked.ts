@@ -87,6 +87,7 @@ export class RainfallNetworkedExecutor {
   /**
    * Register this edge node with the Rainfall backend
    * Reuses existing edgeNodeId from config if available and valid
+   * The daemon is the single source of truth for edge node identity
    */
   async registerEdgeNode(): Promise<string> {
     const capabilities = this.buildCapabilitiesList();
@@ -94,19 +95,19 @@ export class RainfallNetworkedExecutor {
     // If we have an existing edge node ID from config, try to reuse it
     if (this.options.edgeNodeId) {
       try {
-        // Try to register proc nodes with the existing edge node ID
-        // This will fail if the edge node doesn't exist or has expired
-        await this.rainfall.executeTool('register-proc-edge-nodes', {
+        // Send a heartbeat to check if the edge node is still valid
+        const heartbeatResult = await this.rainfall.executeTool<{ success: boolean; status: string }>('edge-node-heartbeat', {
           edgeNodeId: this.options.edgeNodeId,
-          procNodeIds: [`proc-${this.options.hostname}-${Date.now()}`],
-          publicKey: '',
-          hostname: this.options.hostname,
-          httpPort: this.options.httpPort,
+          activeJobs: 0,
+          queueDepth: 0,
         });
         
-        this.edgeNodeId = this.options.edgeNodeId;
-        console.log(`🌐 Edge node reconnected to Rainfall as ${this.edgeNodeId}`);
-        return this.edgeNodeId;
+        if (heartbeatResult.success && heartbeatResult.status === 'active') {
+          this.edgeNodeId = this.options.edgeNodeId;
+          console.log(`🌐 Edge node reconnected to Rainfall as ${this.edgeNodeId}`);
+          this.startHeartbeat();
+          return this.edgeNodeId;
+        }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         if (message.includes('expired') || message.includes('not found')) {
@@ -119,7 +120,7 @@ export class RainfallNetworkedExecutor {
     }
     
     try {
-      // Use the register-edge-node tool if available, otherwise fallback to direct API
+      // Register a new edge node with the backend
       const result = await this.rainfall.executeTool<{ edgeNodeId: string }>('register-edge-node', {
         hostname: this.options.hostname,
         capabilities,
@@ -136,12 +137,51 @@ export class RainfallNetworkedExecutor {
         this.options.onEdgeNodeRegistered(this.edgeNodeId);
       }
       
+      // Start heartbeat to keep registration alive
+      this.startHeartbeat();
+      
       return this.edgeNodeId;
     } catch (error) {
-      // Fallback: generate a local edge node ID if the backend doesn't have register-edge-node yet
-      this.edgeNodeId = `edge-${this.options.hostname}-${Date.now()}`;
-      console.log(`🌐 Edge node running in local mode (ID: ${this.edgeNodeId})`);
-      return this.edgeNodeId;
+      // If backend registration fails, throw an error - don't fall back to local mode
+      // This ensures we never have ID mismatches
+      throw new Error(`Failed to register edge node with backend: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  private heartbeatInterval?: NodeJS.Timeout;
+
+  /**
+   * Start sending periodic heartbeats to keep edge node registration alive
+   */
+  private startHeartbeat(): void {
+    if (this.heartbeatInterval) {
+      clearInterval(this.heartbeatInterval);
+    }
+    
+    // Send heartbeat every 60 seconds (TTL is 2 minutes, so this is safe)
+    this.heartbeatInterval = setInterval(async () => {
+      if (!this.edgeNodeId) return;
+      
+      try {
+        await this.rainfall.executeTool('edge-node-heartbeat', {
+          edgeNodeId: this.edgeNodeId,
+          activeJobs: this.jobCallbacks.size,
+          queueDepth: 0,
+        });
+      } catch (error) {
+        // Heartbeat failed - edge node may have expired
+        console.warn(`⚠️  Edge node heartbeat failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }, 60000);
+  }
+
+  /**
+   * Stop sending heartbeats
+   */
+  private stopHeartbeat(): void {
+    if (this.heartbeatInterval) {
+      clearInterval(this.heartbeatInterval);
+      this.heartbeatInterval = undefined;
     }
   }
 
@@ -150,6 +190,9 @@ export class RainfallNetworkedExecutor {
    */
   async unregisterEdgeNode(): Promise<void> {
     if (!this.edgeNodeId) return;
+
+    // Stop heartbeat first
+    this.stopHeartbeat();
 
     try {
       await this.rainfall.executeTool('unregister-edge-node', {
@@ -283,9 +326,14 @@ export class RainfallNetworkedExecutor {
       const result = await this.rainfall.executeTool<{ job: QueuedJob }>('claim-job', {
         edgeNodeId: this.edgeNodeId,
         capabilities: this.buildCapabilitiesList(),
+        maxWait: 5000,
       });
+      if (result.job) {
+        console.log(`📥 Claimed job ${result.job.jobId} for tool ${result.job.toolId}`);
+      }
       return result.job;
-    } catch {
+    } catch (error) {
+      console.warn(`⚠️ Failed to claim job: ${error instanceof Error ? error.message : String(error)}`);
       return null;
     }
   }
