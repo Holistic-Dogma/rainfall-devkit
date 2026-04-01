@@ -8,9 +8,10 @@
 import { Rainfall } from '../../sdk.js';
 import { loadConfig, saveConfig, getConfigDir } from '../config.js';
 import { resolve, join } from 'path';
-import { existsSync, mkdtempSync, writeFileSync } from 'fs';
+import { existsSync, mkdtempSync, writeFileSync, readFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { execSync } from 'child_process';
+import { createHash } from 'crypto';
 
 export interface ExposeFunctionOptions {
   file: string;
@@ -23,7 +24,13 @@ export interface ExposeFunctionResult {
   success: boolean;
   name: string;
   edgeNodeId?: string;
+  bundleHash?: string;
   error?: string;
+}
+
+function computeBundleHash(filePath: string): string {
+  const content = readFileSync(filePath, 'utf8');
+  return createHash('sha256').update(content).digest('hex');
 }
 
 function transpileIfNeeded(filePath: string): string {
@@ -99,12 +106,17 @@ function loadAndValidate(filePath: string, rainfall: Rainfall, expectedName: str
 export async function exposeFunction(options: ExposeFunctionOptions): Promise<ExposeFunctionResult> {
   const { file, name, port = 8787, rainfall } = options;
 
-  // 1. Load and validate the local module
+  // 1. Compute bundle hash from source
+  console.log(`🔐 Computing bundle hash...`);
+  const bundleHash = computeBundleHash(resolve(file));
+  console.log(`   Bundle hash: ${bundleHash.slice(0, 16)}...`);
+
+  // 2. Load and validate the local module
   console.log(`📂 Loading local function from ${file}...`);
   const definition = loadAndValidate(file, rainfall, name);
   console.log(`✅ Validated local function: ${name}`);
 
-  // 2. Get the daemon's edge node ID from status endpoint
+  // 3. Get the daemon's edge node ID from status endpoint
   console.log('\n📡 Getting edge node info from daemon...');
   let edgeNodeId: string;
   try {
@@ -127,7 +139,7 @@ export async function exposeFunction(options: ExposeFunctionOptions): Promise<Ex
     throw new Error(`Failed to get edge node info from daemon: ${message}. Make sure the daemon is running: rainfall daemon start`);
   }
 
-  // 3. Register proc node for this function with the daemon's edge node ID
+  // 4. Register proc node for this function with the daemon's edge node ID
   console.log('\n📡 Registering proc node...');
   
   let result: {
@@ -169,7 +181,7 @@ export async function exposeFunction(options: ExposeFunctionOptions): Promise<Ex
   console.log('Edge Node ID:', result.edgeNodeId);
   console.log('Proc Node:', name);
 
-  // 4. Register the schema centrally so /params and node_list can find it
+  // 5. Register the schema centrally so /params and node_list can find it
   console.log('\n📡 Registering function schema...');
   try {
     await rainfall.executeTool('register-node-schema', {
@@ -180,6 +192,7 @@ export async function exposeFunction(options: ExposeFunctionOptions): Promise<Ex
       category: 'edge',
       visibility: 'private',
       edgeNodeId: result.edgeNodeId,
+      bundleHash,
     });
     console.log('✅ Schema registered centrally');
   } catch (error) {
@@ -188,7 +201,7 @@ export async function exposeFunction(options: ExposeFunctionOptions): Promise<Ex
     console.warn('   The function will still work, but /params may return blank.');
   }
 
-  // 5. Tell the daemon to load this local function
+  // 6. Tell the daemon to load this local function
   console.log('\n📡 Notifying daemon...');
   try {
     const response = await fetch(`http://localhost:${port}/admin/load-local-function`, {
@@ -199,6 +212,7 @@ export async function exposeFunction(options: ExposeFunctionOptions): Promise<Ex
         name,
         description: definition.description,
         schema: definition.schema,
+        bundleHash,
       }),
     });
 
@@ -224,5 +238,6 @@ export async function exposeFunction(options: ExposeFunctionOptions): Promise<Ex
     success: true,
     name,
     edgeNodeId: result.edgeNodeId,
+    bundleHash,
   };
 }

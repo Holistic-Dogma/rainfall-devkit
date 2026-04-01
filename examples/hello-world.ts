@@ -8,7 +8,10 @@ export default ({ rainfall }: { rainfall: any }) => {
     schema: {
       type: "object",
       properties: {
-       
+        hellotarget: {
+          type: "string",
+          
+        }
       },
       required: []
     },

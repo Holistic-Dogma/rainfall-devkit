@@ -40,26 +40,18 @@ export interface TaskPollerConfig {
   debug?: boolean;
 }
 
-export interface TaskExecutionContext {
-  rainfall: Rainfall;
-  task: Task;
-  log: (message: string, ...args: unknown[]) => void;
-}
-
-export type TaskExecutor = (context: TaskExecutionContext) => Promise<Record<string, unknown>>;
-
 export class TaskPoller {
   private rainfall: Rainfall;
   private config: Required<TaskPollerConfig>;
   private isRunning = false;
   private pollTimer?: NodeJS.Timeout;
   private activeTasks = new Map<string, Promise<void>>();
-  private localFunctions: Map<string, { execute: TaskExecutor }>;
+  private localFunctions: Map<string, { execute: (params: Record<string, unknown>) => Promise<unknown>; bundleHash?: string }>;
   private subscriberId?: string;
 
   constructor(
     rainfall: Rainfall,
-    localFunctions: Map<string, { execute: TaskExecutor }>,
+    localFunctions: Map<string, { execute: (params: Record<string, unknown>) => Promise<unknown>; bundleHash?: string }>,
     config: TaskPollerConfig = {}
   ) {
     this.rainfall = rainfall;
@@ -264,12 +256,13 @@ export class TaskPoller {
       let result: Record<string, unknown>;
 
       if (localFn) {
-        // Execute the local function with sandboxed context
-        const context: TaskExecutionContext = {
-          rainfall: this.rainfall,
-          task,
-          log: (message, ...args) => this.log(`[${functionName}] ${message}`, ...args),
-        };
+        // Verify bundle hash if task specifies one
+        if (task.bundle_hash && localFn.bundleHash && task.bundle_hash !== localFn.bundleHash) {
+          throw new Error(
+            `Bundle hash mismatch for ${functionName}: task expects ${task.bundle_hash.slice(0, 16)}..., ` +
+            `but local function has ${localFn.bundleHash.slice(0, 16)}...`
+          );
+        }
 
         // Apply permissions sandbox if specified
         if (task.permissions?.paths) {
@@ -277,7 +270,8 @@ export class TaskPoller {
           // TODO: Implement actual filesystem sandboxing
         }
 
-        result = await localFn.execute(context);
+        // Pass task_config as params (local functions expect direct params, not a context object)
+        result = await localFn.execute(task.task_config || {});
       } else if (task.target_function) {
         // Task explicitly targets a function that is not available on this node
         throw new Error(`Function ${task.target_function} not available on this node`);

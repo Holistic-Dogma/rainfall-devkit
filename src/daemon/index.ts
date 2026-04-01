@@ -107,6 +107,7 @@ export interface LocalFunctionDefinition {
   description: string;
   schema: Record<string, unknown>;
   execute: (params: Record<string, unknown>) => Promise<unknown>;
+  bundleHash?: string;
 }
 
 export interface DaemonConfig {
@@ -294,7 +295,7 @@ export class RainfallDaemon {
     // Initialize task poller for structured job queue
     this.taskPoller = new TaskPoller(
       this.rainfall,
-      this.localFunctions as unknown as Map<string, { execute: (context: unknown) => Promise<Record<string, unknown>> }>,
+      this.localFunctions,
       {
         pollInterval: 5000,
         maxConcurrent: 3,
@@ -980,7 +981,7 @@ export class RainfallDaemon {
 
     // Admin endpoint: load a local function
     this.openaiApp.post('/admin/load-local-function', async (req: Request, res: Response) => {
-      const { filePath, name, description, schema } = req.body;
+      const { filePath, name, description, schema, bundleHash } = req.body;
 
       if (!filePath || !name) {
         res.status(400).json({ error: 'Missing required fields: filePath, name' });
@@ -988,7 +989,7 @@ export class RainfallDaemon {
       }
 
       try {
-        await this.loadLocalFunction(filePath, name, description, schema);
+        await this.loadLocalFunction(filePath, name, description, schema, bundleHash);
         res.json({ success: true, name, loaded: true });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -1114,7 +1115,8 @@ export class RainfallDaemon {
     filePath: string, 
     expectedName?: string,
     providedDescription?: string,
-    providedSchema?: Record<string, unknown>
+    providedSchema?: Record<string, unknown>,
+    bundleHash?: string
   ): Promise<LocalFunctionDefinition> {
     if (!this.rainfall) {
       throw new Error('Rainfall SDK not initialized');
@@ -1192,7 +1194,8 @@ export class RainfallDaemon {
       name, 
       description: finalDescription, 
       schema: finalSchema, 
-      execute 
+      execute,
+      bundleHash,
     };
     this.localFunctions.set(name, localFn);
 
