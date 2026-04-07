@@ -18,7 +18,7 @@ export default ({ rainfall }: { rainfall: any }) => {
     async execute(args:any) {
       console.log(`executing. ${JSON.stringify(args)}`)
       return {
-        message: "hello world"
+        message: `hello ${ args?.hellotarget || 'you'}`
       }
     }
   };

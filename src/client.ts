@@ -435,4 +435,31 @@ export class RainfallClient {
     
     return result.data || [];
   }
+
+  /**
+   * Get tools from the registry (registry-driven tool discovery)
+   * 
+   * @param namespacePrefix - Namespace prefix to filter by (default: 'tools')
+   * @returns Unified tool list from registry
+   */
+  async getRegistryTools(namespacePrefix = 'tools'): Promise<{ 
+    success: boolean; 
+    tools?: Array<{
+      id: string;
+      name: string;
+      description: string;
+      parameters: Record<string, unknown>;
+      source: { type: string; metadata: Record<string, unknown> };
+      visibility: string;
+      updated_at: string;
+      metadata: Record<string, unknown>;
+    }>;
+    pagination?: { page: number; per_page: number; total: number };
+    error?: string;
+  }> {
+    return this.request(
+      `/olympic/registry/tools?namespace_prefix=${encodeURIComponent(namespacePrefix)}`,
+      { method: 'GET' }
+    );
+  }
 }

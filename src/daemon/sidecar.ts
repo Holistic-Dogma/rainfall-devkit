@@ -65,6 +65,24 @@ Environment variables override CLI arguments.
     const envPort = parseInt(process.env.RAINFALL_OPENAI_PORT, 10);
     if (!isNaN(envPort)) openaiPort = envPort;
   }
+  
+  // Get API key from environment
+  const apiKey = process.env.RAINFALL_API_KEY;
+  console.log(`[sidecar] API key from environment: ${apiKey ? `YES (length: ${apiKey.length})` : 'NO'}`);
+  
+  // Collect provider API keys from environment
+  // Format: PROVIDER_API_KEY_{PROVIDER_ID}={API_KEY}
+  const providerApiKeys: Record<string, string> = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (key.startsWith('PROVIDER_API_KEY_') && value) {
+      const providerId = key.replace('PROVIDER_API_KEY_', '').toLowerCase().replace(/_/g, '-');
+      providerApiKeys[providerId] = value;
+      console.log(`[sidecar] Found API key for provider: ${providerId} (length: ${value.length})`);
+    }
+  }
+  if (Object.keys(providerApiKeys).length > 0) {
+    console.log(`[sidecar] Total provider API keys: ${Object.keys(providerApiKeys).length}`);
+  }
 
   // Handle signals for graceful shutdown
   process.on('SIGINT', async () => {
@@ -82,7 +100,14 @@ Environment variables override CLI arguments.
   // Start the daemon
   try {
     console.log('[sidecar] Starting Rainfall daemon...');
-    const daemon = await startDaemon({ port, openaiPort, debug, enableMcpProxy });
+    const daemon = await startDaemon({ 
+      port, 
+      openaiPort, 
+      debug, 
+      enableMcpProxy,
+      rainfallConfig: apiKey ? { apiKey } : undefined,
+      providerApiKeys: Object.keys(providerApiKeys).length > 0 ? providerApiKeys : undefined
+    });
     console.log(`[sidecar] Daemon ready - WebSocket: ${port || 8765}, OpenAI proxy: ${openaiPort || 8787}`);
     
     // Keep the process alive

@@ -165,22 +165,22 @@ const webSearchHandler: ToolHandler = {
 // Memory recall handler - formatted list
 const memoryRecallHandler: ToolHandler = {
   toolId: /memory-recall|recall/,
-  
+
   async display(context) {
     const { result, flags } = context;
-    
+
     if (flags.raw) {
       return false;
     }
-    
+
     if (Array.isArray(result)) {
       if (result.length === 0) {
         console.log('No memories found.');
         return true;
       }
-      
+
       console.log(`Found ${result.length} memory(s):\n`);
-      
+
       result.forEach((mem: unknown, i: number) => {
         const memory = mem as Record<string, unknown>;
         console.log(`─`.repeat(60));
@@ -193,11 +193,28 @@ const memoryRecallHandler: ToolHandler = {
         }
         console.log();
       });
-      
+
       return true;
     }
-    
+
     return false;
+  },
+};
+
+// Memory create handler - convert comma-separated keywords to array
+const memoryCreateHandler: ToolHandler = {
+  toolId: 'memory-create',
+
+  async preflight(context) {
+    // Convert comma-separated keywords to array
+    const { parseValue } = await import('../core/param-parser.js');
+    const params = { ...context.params };
+
+    if (params.keywords && typeof params.keywords === 'string') {
+      params.keywords = parseValue(params.keywords, { type: 'array', items: { type: 'string' } });
+    }
+
+    return { params };
   },
 };
 
@@ -211,6 +228,7 @@ export function registerBuiltInHandlers(registry: ToolHandlerRegistry = globalHa
   registry.register(csvQueryHandler);
   registry.register(webSearchHandler);
   registry.register(memoryRecallHandler);
+  registry.register(memoryCreateHandler);
   registry.register(googleToolHandler);
 }
 

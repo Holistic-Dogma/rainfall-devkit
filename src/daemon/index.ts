@@ -20,6 +20,8 @@ import { RainfallDaemonContext, ContextOptions } from '../services/context.js';
 import { RainfallListenerRegistry } from '../services/listeners.js';
 import { MCPProxyHub, MCPClientConfig } from '../services/mcp-proxy.js';
 import { TaskPoller, TaskPollerConfig } from '../services/task-poller.js';
+import { ToolRegistry } from '../services/tool-registry.js';
+import { MixedToolRequest, RegisteredTool } from '../types.js';
 
 // MCP message types
 interface MCPMessage {
@@ -126,6 +128,8 @@ export interface DaemonConfig {
   mcpNamespacePrefix?: boolean;
   /** Pre-configured MCP clients to connect on startup */
   mcpClients?: MCPClientConfig[];
+  /** Pre-configured provider API keys (providerId -> apiKey) */
+  providerApiKeys?: Record<string, string>;
 }
 
 export interface DaemonStatus {
@@ -175,8 +179,12 @@ export class RainfallDaemon {
   private listeners?: RainfallListenerRegistry;
   private mcpProxy?: MCPProxyHub;
   private taskPoller?: TaskPoller;
+  private toolRegistry?: ToolRegistry;
   private enableMcpProxy: boolean;
   private mcpNamespacePrefix: boolean;
+  
+  // Provider API keys passed from parent process (e.g., Tauri sidecar)
+  private providerApiKeys: Record<string, string> = {};
 
   constructor(config: DaemonConfig = {}) {
     this.port = config.port || 8765;
@@ -185,6 +193,7 @@ export class RainfallDaemon {
     this.debug = config.debug || false;
     this.enableMcpProxy = config.enableMcpProxy ?? true;
     this.mcpNamespacePrefix = config.mcpNamespacePrefix ?? true;
+    this.providerApiKeys = config.providerApiKeys || {};
     this.openaiApp = express();
     this.openaiApp.use(express.json());
   }
@@ -305,6 +314,16 @@ export class RainfallDaemon {
     await this.taskPoller.initialize();
     this.taskPoller.start();
     this.log('📋 Task poller started');
+
+    // Initialize tool registry (loads from backend + local sources)
+    this.toolRegistry = new ToolRegistry({
+      rainfall: this.rainfall,
+      mcpProxy: this.mcpProxy,
+      refreshIntervalMs: 60000, // Refresh every minute
+      debug: this.debug,
+    });
+    await this.toolRegistry.refresh();
+    this.log(`🧰 Tool registry loaded with ${this.toolRegistry.getTools().length} tools`);
 
     // Start WebSocket server for MCP
     await this.startWebSocketServer();
@@ -1055,6 +1074,239 @@ export class RainfallDaemon {
       }
     });
 
+    // Tool registry endpoint - list all available tools
+    this.openaiApp.get('/v1/tools', async (_req: Request, res: Response) => {
+      const tools = this.toolRegistry?.getTools() || [];
+      res.json({
+        object: 'list',
+        data: tools.map(t => ({
+          id: t.id,
+          name: t.name,
+          description: t.description,
+          source: t.source.type,
+        })),
+      });
+    });
+
+    // Mixed completions endpoint - uses registry-driven tool discovery
+    this.openaiApp.post('/v1/chat/completions_mixed', async (req: Request, res: Response) => {
+      const body: MixedToolRequest = req.body;
+
+      if (!body.messages || !Array.isArray(body.messages)) {
+        res.status(400).json({
+          error: {
+            message: 'Missing required field: messages',
+            type: 'invalid_request_error',
+          },
+        });
+        return;
+      }
+
+      if (!this.rainfall) {
+        res.status(503).json({
+          error: {
+            message: 'Rainfall SDK not initialized',
+            type: 'service_unavailable',
+          },
+        });
+        return;
+      }
+
+      try {
+        // Build tool list from registry based on request
+        let selectedTools: RegisteredTool[] = [];
+        if (body.tools) {
+          selectedTools = this.toolRegistry!.getTools({ specificIds: body.tools });
+        } else if (body.toolSources) {
+          selectedTools = this.toolRegistry!.getTools({ sources: body.toolSources });
+        } else if (body.enableAllTools) {
+          selectedTools = this.toolRegistry!.getTools();
+        }
+
+        // Convert to OpenAI format (underscore names)
+        const openaiTools = selectedTools.map(t => ({
+          type: 'function' as const,
+          function: {
+            name: t.id.replace(/-/g, '_'),
+            description: t.description,
+            parameters: t.parameters,
+          },
+        }));
+
+        // Get subscriber ID
+        const me = await this.rainfall.getMe();
+        const subscriberId = me.id;
+
+        // Build local tool map for quick lookup
+        const localToolMap = await this.buildLocalToolMap();
+
+        // Track messages for the conversation (mutable for tool loop)
+        let messages = [...body.messages];
+        const maxToolIterations = 10;
+        let toolIterations = 0;
+
+        // Tool execution loop (similar to regular /v1/chat/completions)
+        while (toolIterations < maxToolIterations) {
+          toolIterations++;
+
+          // Call the LLM
+          const llmResponse = await this.callLLM({
+            subscriberId,
+            model: body.model,
+            messages,
+            tools: openaiTools.length > 0 ? openaiTools : undefined,
+            tool_choice: openaiTools.length > 0 ? 'auto' : undefined,
+            temperature: body.temperature,
+            max_tokens: body.max_tokens,
+            stream: false,
+          });
+
+          // Check if the model wants to call tools
+          const choice = llmResponse.choices?.[0];
+          let toolCalls = choice?.message?.tool_calls || [];
+
+          // Also check for XML-style tool calls in content
+          const content = choice?.message?.content || '';
+          const reasoningContent = (choice?.message as { reasoning_content?: string })?.reasoning_content || '';
+          const fullContent = content + ' ' + reasoningContent;
+          const xmlToolCalls = this.parseXMLToolCalls(fullContent);
+          if (xmlToolCalls.length > 0) {
+            this.log(`📋 Parsed ${xmlToolCalls.length} XML tool calls from content`);
+            toolCalls = xmlToolCalls;
+          }
+
+          if (!toolCalls || toolCalls.length === 0) {
+            // No tool calls - return the final response with metadata
+            const metadata = {
+              tools_available: selectedTools.map(t => t.id),
+              tools_used: [],
+              tool_sources: body.toolSources,
+              enable_all_tools: body.enableAllTools,
+              provider: body.model,
+            };
+
+            if (body.stream) {
+              await this.streamResponse(res, llmResponse, metadata);
+            } else {
+              res.json({
+                ...llmResponse,
+                rainfall_metadata: metadata,
+              });
+            }
+
+            this.updateContext(body.messages, llmResponse);
+            return;
+          }
+
+          // Track which tools were actually used
+          const toolsUsed: string[] = [];
+
+          // Model wants to call tools - add assistant message with tool_calls
+          messages.push({
+            role: 'assistant',
+            content: choice?.message?.content || '',
+            tool_calls: toolCalls as ToolCall[],
+          });
+
+          // Execute each tool call
+          for (const toolCall of toolCalls as ToolCall[]) {
+            const toolName = toolCall.function?.name;
+            const toolArgsStr = toolCall.function?.arguments || '{}';
+
+            if (!toolName) continue;
+
+            this.log(`🔧 Tool call: ${toolName}`);
+            toolsUsed.push(toolName);
+
+            let toolResult: unknown;
+            let toolError: string | undefined;
+
+            try {
+              // Check if this is a local Rainfall tool
+              const localTool = this.findLocalTool(toolName, localToolMap);
+
+              if (localTool) {
+                this.log(`  → Executing locally`);
+                const args = JSON.parse(toolArgsStr);
+                toolResult = await this.executeLocalTool(localTool.id, args);
+              } else if (this.mcpProxy) {
+                // Try MCP proxy
+                this.log(`  → Trying MCP proxy`);
+                const args = JSON.parse(toolArgsStr);
+                toolResult = await this.executeToolWithMCP(toolName.replace(/_/g, '-'), args);
+              } else {
+                // Let backend handle it
+                const args = JSON.parse(toolArgsStr);
+                toolResult = await this.rainfall!.executeTool(toolName.replace(/_/g, '-'), args);
+              }
+            } catch (error) {
+              toolError = error instanceof Error ? error.message : String(error);
+              this.log(`  → Error: ${toolError}`);
+            }
+
+            // Add tool result to messages
+            messages.push({
+              role: 'tool',
+              content: toolError
+                ? JSON.stringify({ error: toolError })
+                : typeof toolResult === 'string'
+                  ? toolResult
+                  : JSON.stringify(toolResult),
+              tool_call_id: toolCall.id,
+            });
+
+            // Record execution in context
+            if (this.context) {
+              this.context.recordExecution(
+                toolName,
+                JSON.parse(toolArgsStr || '{}'),
+                toolResult,
+                { error: toolError, duration: 0 }
+              );
+            }
+          }
+
+          // If this was the last iteration, return with metadata including tools used
+          if (toolIterations >= maxToolIterations) {
+            const metadata = {
+              tools_available: selectedTools.map(t => t.id),
+              tools_used: [...new Set(toolsUsed)], // dedupe
+              tool_sources: body.toolSources,
+              enable_all_tools: body.enableAllTools,
+              provider: body.model,
+            };
+
+            if (body.stream) {
+              await this.streamResponse(res, llmResponse, metadata);
+            } else {
+              res.json({
+                ...llmResponse,
+                rainfall_metadata: metadata,
+              });
+            }
+            return;
+          }
+        }
+
+        // Max iterations reached
+        res.status(500).json({
+          error: {
+            message: 'Maximum tool execution iterations reached',
+            type: 'tool_execution_error',
+          },
+        });
+
+      } catch (error) {
+        this.log('Mixed chat completions error:', error);
+        res.status(500).json({
+          error: {
+            message: error instanceof Error ? error.message : 'Internal server error',
+            type: 'internal_error',
+          },
+        });
+      }
+    });
+
     return new Promise((resolve) => {
       this.openaiApp.listen(this.openaiPort, () => {
         resolve();
@@ -1295,41 +1547,147 @@ export class RainfallDaemon {
   }
 
   /**
+   * Get provider configuration from Rainline's provider storage
+   * Reads from ~/.config/digital.pragma.rainfall-devkit/llm_providers.json
+   */
+  private async getProviderConfig(providerId: string): Promise<{ apiKey?: string; baseUrl?: string; name?: string } | null> {
+    try {
+      const { readFile } = await import('fs/promises');
+      const { join } = await import('path');
+      const { homedir, platform } = await import('os');
+
+      // Use platform-appropriate config directory
+      const isMac = platform() === 'darwin';
+      const configDir = isMac
+        ? join(homedir(), 'Library', 'Application Support', 'digital.pragma.rainfall-devkit')
+        : join(homedir(), '.config', 'digital.pragma.rainfall-devkit');
+      const providersFile = join(configDir, 'llm_providers.json');
+
+      const content = await readFile(providersFile, 'utf-8');
+      const providers = JSON.parse(content);
+
+      const provider = providers.find((p: { id: string; key?: string }) => p.id === providerId || p.key === providerId);
+      if (provider && (provider as { has_api_key?: boolean }).has_api_key) {
+        // First check if API key was passed via environment/config (from Tauri sidecar)
+        if (this.providerApiKeys[providerId]) {
+          this.log(`Using API key from environment for provider: ${providerId}`);
+          return {
+            apiKey: this.providerApiKeys[providerId],
+            baseUrl: (provider as { host?: string })?.host,
+            name: (provider as { name?: string })?.name,
+          };
+        }
+        
+        // Fall back to keychain lookup
+        const apiKey = await this.getProviderApiKeyFromKeychain(providerId);
+        return {
+          apiKey,
+          baseUrl: (provider as { host?: string })?.host,
+          name: (provider as { name?: string })?.name,
+        };
+      }
+      return null;
+    } catch (error) {
+      this.log(`Failed to load provider config for ${providerId}:`, error);
+      return null;
+    }
+  }
+
+  /**
+   * Get API key from keychain for a specific provider
+   */
+  private async getProviderApiKeyFromKeychain(providerId: string): Promise<string | undefined> {
+    try {
+      // Use Node's child_process to call security command on macOS
+      const { execSync } = await import('child_process');
+      const service = 'digital.pragma.rainfall-devkit';
+      const account = `rainfall-llm-provider-${providerId}`;
+
+      const command = `security find-generic-password -s "${service}" -a "${account}" -w 2>/dev/null`;
+      const result = execSync(command, { encoding: 'utf-8', stdio: 'pipe' });
+
+      // execSync with encoding returns string directly
+      if (result) {
+        return result.trim();
+      }
+      return undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
    * Call the LLM via Rainfall backend, LM Studio, RunPod, or other providers
-   * 
+   *
    * Provider priority:
-   * 1. Config file (llm.provider, llm.baseUrl)
-   * 2. Environment variables (OPENAI_API_KEY, OLLAMA_HOST, etc.)
-   * 3. Default to Rainfall (credits-based)
+   * 1. Model parameter in "provider:model" format (e.g., "anthropic:claude-3-5-sonnet")
+   * 2. Config file (llm.provider, llm.baseUrl)
+   * 3. Environment variables (OPENAI_API_KEY, OLLAMA_HOST, etc.)
+   * 4. Default to Rainfall (credits-based)
    */
   private async callLLM(params: LLMCallParams): Promise<LLMResponse> {
     if (!this.rainfall) {
       throw new Error('Rainfall SDK not initialized');
     }
 
-    // Load config to determine provider
+    // Load config for fallback
     const { loadConfig, getProviderBaseUrl } = await import('../cli/config.js');
     const config = loadConfig();
-    const provider = config.llm?.provider || 'rainfall';
 
-    // Route to appropriate provider
-    switch (provider) {
+    // Parse provider:model format from params.model (e.g., "anthropic:claude-3-5-sonnet")
+    let resolvedProvider: string = config.llm?.provider || 'rainfall';
+    let resolvedModel: string = params.model || 'gpt-4o';
+
+    if (params.model && params.model.includes(':')) {
+      const [parsedProvider, ...modelParts] = params.model.split(':');
+      if (parsedProvider && modelParts.length > 0) {
+        resolvedProvider = parsedProvider;
+        resolvedModel = modelParts.join(':'); // Handle cases where model name contains colons
+      }
+    }
+
+    // HARD LOGGING — this is what you asked for
+    console.log(`[LLM ROUTE] provider=${resolvedProvider} model=${resolvedModel} timestamp=${new Date().toISOString()}`);
+
+    // Check if this is a known built-in provider
+    const knownProviders = ['local', 'ollama', 'custom', 'openai', 'anthropic', 'rainfall'];
+    const isKnownProvider = knownProviders.includes(resolvedProvider);
+
+    // For known providers, use the existing routing logic
+    // For registry providers (kimi, grok, z.ai, etc.), use OpenAI-compatible API
+    if (!isKnownProvider) {
+      // Try to get provider config from Rainline's provider storage
+      const providerConfig = await this.getProviderConfig(resolvedProvider);
+      if (providerConfig?.apiKey) {
+        this.log(`🔀 Routing to registry provider: ${resolvedProvider} (${providerConfig.name || resolvedProvider})`);
+        return this.callRegistryProviderLLM(
+          { ...params, model: resolvedModel },
+          resolvedProvider,
+          { apiKey: providerConfig.apiKey, baseUrl: providerConfig.baseUrl, name: providerConfig.name }
+        );
+      } else {
+        throw new Error(`No API key configured for provider ${resolvedProvider}. Please add an API key in Rainline settings.`);
+      }
+    }
+
+    // Route to appropriate known provider
+    switch (resolvedProvider) {
       case 'local':
       case 'ollama':
       case 'custom':
-        return this.callLocalLLM(params, config);
-      
+        return this.callLocalLLM({ ...params, model: resolvedModel }, config);
+
       case 'openai':
       case 'anthropic':
         // Use OpenAI/Anthropic API directly (OpenAI-compatible)
-        return this.callExternalLLM(params, config, provider);
-      
+        return this.callExternalLLM({ ...params, model: resolvedModel }, config, resolvedProvider as 'openai' | 'anthropic');
+
       case 'rainfall':
       default:
         // Use Rainfall backend (credits-based)
         return this.rainfall.chatCompletions({
           subscriber_id: params.subscriberId,
-          model: params.model,
+          model: resolvedModel,
           messages: params.messages as Array<{ role: string; content: string; name?: string }>,
           stream: params.stream || false,
           temperature: params.temperature,
@@ -1340,6 +1698,47 @@ export class RainfallDaemon {
           enable_stacked: params.enable_stacked,
         }) as Promise<{ choices?: Array<{ message?: { content?: string; tool_calls?: ToolCall[] } }> }>;
     }
+  }
+
+  /**
+   * Call a registry provider (kimi, grok, z.ai, etc.) via their OpenAI-compatible API
+   */
+  private async callRegistryProviderLLM(
+    params: LLMCallParams,
+    providerId: string,
+    providerConfig: { apiKey: string; baseUrl?: string; name?: string }
+  ): Promise<LLMResponse> {
+    const baseUrl = providerConfig.baseUrl || `https://${providerId}.openai.ai/v1`;
+    const model = params.model || 'default';
+
+    this.log(`📡 Calling ${providerConfig.name || providerId} at ${baseUrl}`);
+
+    const url = `${baseUrl}/chat/completions`;
+
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${providerConfig.apiKey}`,
+        'User-Agent': 'Rainline/1.0',
+      },
+      body: JSON.stringify({
+        model,
+        messages: params.messages,
+        tools: params.tools,
+        tool_choice: params.tool_choice,
+        temperature: params.temperature,
+        max_tokens: params.max_tokens,
+        stream: false, // Tool loop requires non-streaming
+      }),
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      throw new Error(`${providerId} API error: ${error}`);
+    }
+
+    return response.json() as Promise<LLMResponse>;
   }
 
   /**
@@ -1430,7 +1829,7 @@ export class RainfallDaemon {
   /**
    * Stream a response to the client (converts non-streaming to SSE format)
    */
-  private async streamResponse(res: Response, response: LLMResponse): Promise<void> {
+  private async streamResponse(res: Response, response: LLMResponse, metadata?: Record<string, unknown>): Promise<void> {
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
@@ -1471,6 +1870,18 @@ export class RainfallDaemon {
       model,
       choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
     })}\n\n`);
+
+    // Send metadata if provided (before [DONE])
+    if (metadata) {
+      res.write(`data: ${JSON.stringify({
+        id,
+        object: 'chat.completion.chunk',
+        created,
+        model,
+        choices: [{ index: 0, delta: {}, finish_reason: null }],
+        rainfall_metadata: metadata,
+      })}\n\n`);
+    }
 
     res.write('data: [DONE]\n\n');
     res.end();

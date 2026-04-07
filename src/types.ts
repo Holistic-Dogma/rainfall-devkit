@@ -47,6 +47,40 @@ export interface ToolSchema {
   metadata: Record<string, unknown>;
 }
 
+// Tool Registry types for mixed tooling
+export type ToolSourceType = 'rainfall' | 'mcp' | 'local' | 'external';
+
+export interface ToolSource {
+  type: ToolSourceType;
+  metadata: Record<string, unknown>;
+}
+
+export interface RegisteredTool {
+  id: string;
+  name: string;
+  description: string;
+  parameters: Record<string, unknown>; // JSON Schema
+  source: ToolSource;
+}
+
+export interface MixedToolRequest {
+  model: string;
+  messages: Array<{
+    role: 'system' | 'user' | 'assistant' | 'tool';
+    content: string;
+    name?: string;
+    tool_calls?: unknown[];
+    tool_call_id?: string;
+  }>;
+  tools?: string[];           // Specific tool IDs
+  toolSources?: ToolSourceType[]; // Include all from sources
+  enableAllTools?: boolean;
+  temperature?: number;
+  max_tokens?: number;
+  stream?: boolean;
+  conversation_id?: string;
+}
+
 // Namespace-specific types
 
 export namespace Integrations {

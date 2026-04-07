@@ -394,4 +394,38 @@ export class Rainfall {
   async listModels(subscriberId?: string): Promise<Array<{ id: string; [key: string]: unknown }>> {
     return this.client.listModels(subscriberId);
   }
+
+  /**
+   * Get tools from the registry (registry-driven tool discovery)
+   * 
+   * @param namespacePrefix - Namespace prefix to filter by (default: 'tools')
+   * @returns Unified tool list from registry
+   * 
+   * @example
+   * ```typescript
+   * // Get all tools
+   * const result = await rainfall.getRegistryTools();
+   * console.log(result.tools); // [{ id: 'tools.rainfall.finviz-quotes', ... }]
+   * 
+   * // Get only rainfall tools
+   * const result = await rainfall.getRegistryTools('tools.rainfall');
+   * ```
+   */
+  async getRegistryTools(namespacePrefix = 'tools'): Promise<{ 
+    success: boolean; 
+    tools?: Array<{
+      id: string;
+      name: string;
+      description: string;
+      parameters: Record<string, unknown>;
+      source: { type: string; metadata: Record<string, unknown> };
+      visibility: string;
+      updated_at: string;
+      metadata: Record<string, unknown>;
+    }>;
+    pagination?: { page: number; per_page: number; total: number };
+    error?: string;
+  }> {
+    return this.client.getRegistryTools(namespacePrefix);
+  }
 }
