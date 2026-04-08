@@ -69,7 +69,14 @@ export interface MixedToolRequest {
     role: 'system' | 'user' | 'assistant' | 'tool';
     content: string;
     name?: string;
-    tool_calls?: unknown[];
+    tool_calls?: Array<{
+      id: string;
+      type: 'function';
+      function: {
+        name: string;
+        arguments: string;
+      };
+    }>;
     tool_call_id?: string;
   }>;
   tools?: string[];           // Specific tool IDs

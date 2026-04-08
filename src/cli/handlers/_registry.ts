@@ -1,14 +1,66 @@
 /**
  * Tool handler registry with auto-discovery
- * 
+ *
  * Handlers in this directory are automatically registered.
  * Naming convention: {tool-id}.ts (e.g., finviz-quotes.ts)
- * 
+ *
  * Each handler file should export a default ToolHandler or an array of handlers.
  */
 
 import { ToolHandler, ToolHandlerRegistry } from '../core/types.js';
 import { globalHandlerRegistry } from '../core/types.js';
+import { fetchToolSchema, type ToolParamsSchema } from '../../validation.js';
+import { parseValue } from '../core/param-parser.js';
+
+// Generic handler for array parameter conversion using tool schema
+// This handles comma-separated strings to array conversion dynamically
+const genericArrayParameterHandler: ToolHandler = {
+  toolId: /.*/, // Apply to all tools
+
+  async preflight(context) {
+    const { rainfall, toolId, params } = context;
+
+    try {
+      // Get the client and fetch the tool schema to get parameter types
+      const client = rainfall.getClient();
+      const schema = await fetchToolSchema(client, toolId);
+      const parameters = schema.parameters || {};
+      const modifiedParams = { ...params };
+
+      // Process each parameter according to its schema
+      for (const [paramName, paramValue] of Object.entries(params)) {
+        const paramSchema = parameters[paramName];
+
+        // Only process if we have a schema and the value is a string that needs conversion
+        if (paramSchema && typeof paramValue === 'string') {
+          const expectedType = paramSchema.type;
+
+          // Handle array type parameters
+          if (expectedType === 'array') {
+            // Check if it's not already a JSON array (could be comma-separated)
+            if (!paramValue.startsWith('[')) {
+              modifiedParams[paramName] = parseValue(paramValue, paramSchema);
+            }
+          }
+          // Handle number type parameters
+          else if (expectedType === 'number') {
+            modifiedParams[paramName] = parseValue(paramValue, paramSchema);
+          }
+          // Handle boolean type parameters
+          else if (expectedType === 'boolean') {
+            modifiedParams[paramName] = parseValue(paramValue, paramSchema);
+          }
+        }
+      }
+
+      return { params: modifiedParams };
+    } catch (error) {
+      // If we can't fetch the schema, just continue with original params
+      // The API will handle any validation issues
+      return { params };
+    }
+  },
+};
 
 // Import built-in handlers
 // These are explicitly imported for type safety and tree-shaking
@@ -43,33 +95,21 @@ const imageGenerationHandler: ToolHandler = {
 // Finviz quotes handler - table display
 const finvizQuotesHandler: ToolHandler = {
   toolId: 'finviz-quotes',
-  
-  async preflight(context) {
-    // Convert comma-separated tickers to array
-    const { parseValue } = await import('../core/param-parser.js');
-    const params = { ...context.params };
-    
-    if (params.tickers && typeof params.tickers === 'string') {
-      params.tickers = parseValue(params.tickers, { type: 'array', items: { type: 'string' } });
-    }
-    
-    return { params };
-  },
-  
+
   async display(context) {
     const { result, flags } = context;
-    
+
     if (flags.raw) {
       return false; // Use default
     }
-    
+
     // Display quotes as table
     const obj = result as Record<string, unknown>;
     const quotes = obj?.quotes;
-    
+
     if (Array.isArray(quotes) && quotes.length > 0) {
       const { formatAsTable } = await import('../core/display.js');
-      
+
       // Extract relevant fields for table
       const tableData = quotes.map((q: unknown) => {
         const quote = q as Record<string, unknown>;
@@ -82,18 +122,18 @@ const finvizQuotesHandler: ToolHandler = {
           'Market Cap': data.MarketCap || '-',
         };
       });
-      
+
       console.log(formatAsTable(tableData));
-      
+
       // Show summary if available
       const summary = obj?.summary;
       if (summary && typeof summary === 'string') {
         console.log(`\n${summary}`);
       }
-      
+
       return true;
     }
-    
+
     return false;
   },
 };
@@ -201,21 +241,10 @@ const memoryRecallHandler: ToolHandler = {
   },
 };
 
-// Memory create handler - convert comma-separated keywords to array
+// Memory create handler - removed, now handled by generic array parameter handler
 const memoryCreateHandler: ToolHandler = {
   toolId: 'memory-create',
-
-  async preflight(context) {
-    // Convert comma-separated keywords to array
-    const { parseValue } = await import('../core/param-parser.js');
-    const params = { ...context.params };
-
-    if (params.keywords && typeof params.keywords === 'string') {
-      params.keywords = parseValue(params.keywords, { type: 'array', items: { type: 'string' } });
-    }
-
-    return { params };
-  },
+  // No special handling needed - handled by generic array parameter conversion
 };
 
 // Import and register Google handler
@@ -223,6 +252,10 @@ import { googleToolHandler } from './google.js';
 
 // Register all built-in handlers
 export function registerBuiltInHandlers(registry: ToolHandlerRegistry = globalHandlerRegistry): void {
+  // Register generic handlers first (lower priority)
+  registry.register(genericArrayParameterHandler);
+
+  // Register specific handlers
   registry.register(imageGenerationHandler);
   registry.register(finvizQuotesHandler);
   registry.register(csvQueryHandler);
