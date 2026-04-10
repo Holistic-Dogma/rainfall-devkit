@@ -15,7 +15,7 @@ import { formatResult, DisplayMode } from './core/display.js';
 import { globalHandlerRegistry } from './handlers/_registry.js';
 import type { ToolContext, PostflightContext } from './core/types.js';
 import { exposeFunction } from './edge/expose-function.js';
-import { agentList, agentSwitch, agentShow } from './agent.js';
+import { agentList, agentSwitch, agentShow, agentChat } from './agent.js';
 
 function printHelp(): void {
   console.log(`
@@ -41,6 +41,7 @@ Commands:
   agent list                    List all available agents
   agent switch <name>           Set active agent
   agent show <name>             Show agent details
+  agent chat [message]           Chat with active agent (REPL mode if no message)
 
   daemon start                  Start the Rainfall daemon
   daemon stop                   Stop the Rainfall daemon
@@ -2440,9 +2441,12 @@ async function main(): Promise<void> {
         case 'show':
           await agentShow(rest);
           break;
+        case 'chat':
+          await agentChat(rest);
+          break;
         default:
           console.error('Error: Unknown agent subcommand');
-          console.error('\nUsage: rainfall agent <list|switch|show>');
+          console.error('\nUsage: rainfall agent <list|switch|show|chat>');
           process.exit(1);
       }
       break;

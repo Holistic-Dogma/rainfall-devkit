@@ -208,7 +208,193 @@ function getPersonaSummary(agentName: string): string {
   return '(no summary available)';
 }
 
+/**
+ * Get full persona content (checks both locations).
+ */
+function getPersonaFull(agentName: string): string {
+  const personaPath = join(AGENTS_ROOT, agentName, 'persona.md');
+  const userPersonaPath = join(USER_AGENTS_ROOT, agentName, 'persona.md');
+
+  let actualPath = '';
+  if (existsSync(personaPath)) {
+    actualPath = personaPath;
+  } else if (existsSync(userPersonaPath)) {
+    actualPath = userPersonaPath;
+  } else {
+    return '';
+  }
+
+  return readFileSync(actualPath, 'utf-8');
+}
+
 // ─── Commands ───────────────────────────────────────────────────────
+
+/**
+ * rainfall agent chat [message]
+ * Chat with the active agent using Rainfall's chat completions API.
+ * If no message is provided, enters REPL mode for multi-turn conversation.
+ */
+export async function agentChat(args: string[]): Promise<void> {
+  const config = loadConfig();
+  const activeAgent = (config as Record<string, unknown>)?.agent
+    ? (config as any).agent?.active
+    : undefined;
+
+  if (!activeAgent) {
+    console.error('Error: No active agent set.');
+    console.error('Run "rainfall agent switch <name>" to set an active agent.');
+    process.exit(1);
+  }
+
+  // Load agent profile and persona
+  const profile = loadProfile(activeAgent);
+  const persona = getPersonaFull(activeAgent);
+  const model = profile.models?.default || 'gpt-4o';
+
+  // Initialize Rainfall SDK
+  const { Rainfall } = await import('../sdk.js');
+  const rainfall = new Rainfall({ apiKey: config.apiKey });
+
+  // Get subscriber ID
+  const me = await rainfall.getMe();
+
+  // System message with agent persona
+  const systemMessage = persona
+    ? `You are ${activeAgent}. ${persona}\n\nRespond naturally, following your persona and capabilities defined in your profile.`
+    : `You are ${activeAgent}, an AI assistant. Respond naturally and helpfully.`;
+
+  const message = args[0];
+
+  if (message) {
+    // Single message mode
+    console.log(`🤖 ${activeAgent}:`);
+
+    const response = await rainfall.ai.chatCompletions({
+      subscriber_id: me.id,
+      messages: [
+        { role: 'system', content: systemMessage },
+        { role: 'user', content: message }
+      ],
+      model,
+      stream: true,
+    });
+
+    // Handle streaming response
+    if (response instanceof ReadableStream) {
+      const reader = response.getReader();
+      const decoder = new TextDecoder();
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        const chunk = decoder.decode(value);
+        // Parse SSE format
+        const lines = chunk.split('\n');
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            const data = line.slice(6);
+            if (data === '[DONE]') continue;
+
+            try {
+              const parsed = JSON.parse(data);
+              const content = parsed.choices?.[0]?.delta?.content;
+              if (content) {
+                process.stdout.write(content);
+              }
+            } catch (e) {
+              // Skip invalid JSON
+            }
+          }
+        }
+      }
+      console.log('\n');
+    }
+  } else {
+    // REPL mode
+    const { createInterface } = await import('readline');
+    const rl = createInterface({
+      input: process.stdin,
+      output: process.stdout,
+    });
+
+    const messages: Array<{ role: string; content: string }> = [
+      { role: 'system', content: systemMessage }
+    ];
+
+    console.log(`🤖 ${activeAgent} (REPL mode)`);
+    console.log('Type "exit" or press Ctrl+C to quit.\n');
+
+    const ask = (prompt: string): Promise<string> => {
+      return new Promise(resolve => {
+        rl.question(prompt, resolve);
+      });
+    };
+
+    while (true) {
+      const input = await ask('> ');
+
+      if (input.toLowerCase() === 'exit' || input.toLowerCase() === 'quit') {
+        rl.close();
+        console.log('\n👋 Goodbye!');
+        break;
+      }
+
+      if (!input.trim()) continue;
+
+      // Add user message
+      messages.push({ role: 'user', content: input });
+
+      // Get response
+      console.log(`🤖 ${activeAgent}:`);
+
+      const response = await rainfall.ai.chatCompletions({
+        subscriber_id: me.id,
+        messages,
+        model,
+        stream: true,
+      });
+
+      let assistantMessage = '';
+
+      // Handle streaming response
+      if (response instanceof ReadableStream) {
+        const reader = response.getReader();
+        const decoder = new TextDecoder();
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          const chunk = decoder.decode(value);
+          const lines = chunk.split('\n');
+          for (const line of lines) {
+            if (line.startsWith('data: ')) {
+              const data = line.slice(6);
+              if (data === '[DONE]') continue;
+
+              try {
+                const parsed = JSON.parse(data);
+                const content = parsed.choices?.[0]?.delta?.content;
+                if (content) {
+                  process.stdout.write(content);
+                  assistantMessage += content;
+                }
+              } catch (e) {
+                // Skip invalid JSON
+              }
+            }
+          }
+        }
+      }
+
+      console.log('\n');
+
+      // Add assistant message to conversation history
+      messages.push({ role: 'assistant', content: assistantMessage });
+    }
+  }
+}
 
 /**
  * rainfall agent list
