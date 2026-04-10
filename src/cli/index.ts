@@ -15,6 +15,7 @@ import { formatResult, DisplayMode } from './core/display.js';
 import { globalHandlerRegistry } from './handlers/_registry.js';
 import type { ToolContext, PostflightContext } from './core/types.js';
 import { exposeFunction } from './edge/expose-function.js';
+import { agentList, agentSwitch, agentShow } from './agent.js';
 
 function printHelp(): void {
   console.log(`
@@ -36,6 +37,10 @@ Commands:
   tools search <query>          Search for tools
   
   run <tool> [options]          Execute a tool
+
+  agent list                    List all available agents
+  agent switch <name>           Set active agent
+  agent show <name>             Show agent details
 
   daemon start                  Start the Rainfall daemon
   daemon stop                   Stop the Rainfall daemon
@@ -101,6 +106,9 @@ Options for 'daemon start':
 
 Examples:
   rainfall auth login
+  rainfall agent list
+  rainfall agent switch calliope
+  rainfall agent show regina
   rainfall tools list
   rainfall tools describe github-create-issue
   rainfall run exa-web-search -p '{"query": "AI news"}'
@@ -2417,6 +2425,24 @@ async function main(): Promise<void> {
         default:
           console.error('Error: Unknown tools subcommand');
           console.error('\nUsage: rainfall tools <list|describe|search>');
+          process.exit(1);
+      }
+      break;
+
+    case 'agent':
+      switch (subcommand) {
+        case 'list':
+          await agentList();
+          break;
+        case 'switch':
+          await agentSwitch(rest);
+          break;
+        case 'show':
+          await agentShow(rest);
+          break;
+        default:
+          console.error('Error: Unknown agent subcommand');
+          console.error('\nUsage: rainfall agent <list|switch|show>');
           process.exit(1);
       }
       break;
