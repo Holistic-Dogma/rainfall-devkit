@@ -12,6 +12,7 @@
 
 import { WebSocketServer, WebSocket } from 'ws';
 import express, { Request, Response } from 'express';
+import cors from 'cors';
 import { join } from 'path';
 import { Rainfall } from '../sdk.js';
 import { RainfallConfig } from '../types.js';
@@ -194,9 +195,29 @@ export class RainfallDaemon {
     this.enableMcpProxy = config.enableMcpProxy ?? true;
     this.mcpNamespacePrefix = config.mcpNamespacePrefix ?? true;
     this.providerApiKeys = config.providerApiKeys || {};
+
+    // Load provider API keys from environment variables (set by Tauri daemon)
+    // Environment variables are named PROVIDER_API_KEY_<PROVIDER_NAME_UPPERCASE>
+    console.log('[INIT] Loading provider API keys from environment variables...');
+    Object.keys(process.env)
+      .filter(key => key.startsWith('PROVIDER_API_KEY_'))
+      .forEach(envKey => {
+        const providerKey = envKey.replace('PROVIDER_API_KEY_', '').toLowerCase();
+        const apiKey = process.env[envKey];
+        if(apiKey) this.providerApiKeys[providerKey] = apiKey;
+        console.log(`[INIT] Loaded API key from env: ${providerKey} (length: ${apiKey?.length})`);
+      });
+    console.log(`[INIT] Final providerApiKeys keys: ${Object.keys(this.providerApiKeys).join(', ')}`);
+
     this.openaiApp = express();
+    this.openaiApp.use(cors({
+      origin: '*', // Allow all origins for development (Tampermonkey needs this)
+      methods: ['GET', 'POST', 'OPTIONS'],
+      allowedHeaders: ['Content-Type', 'Authorization']
+    }));
     this.openaiApp.use(express.json());
   }
+
 
   async start(): Promise<void> {
     this.log('🌧️  Rainfall Daemon starting...');
@@ -242,7 +263,7 @@ export class RainfallDaemon {
     await this.networkedExecutor.registerEdgeNode();
 
     // Subscribe to job results
-    await this.networkedExecutor.subscribeToResults((jobId, result, error) => {
+    await this.networkedExecutor.subscribeToResults((jobId, result: any, error?: Error|string) => {
       this.log(`📬 Job ${jobId} ${error ? 'failed' : 'completed'}`, error || result);
     });
 
@@ -252,7 +273,7 @@ export class RainfallDaemon {
       const startTime = Date.now();
       
       try {
-        const result = await this.executeLocalTool(toolId, params);
+        const result = await this.executeLocalTool?.(toolId, params);
         const duration = Date.now() - startTime;
         
         // Record execution in context
@@ -294,7 +315,7 @@ export class RainfallDaemon {
         for (const clientConfig of this.rainfallConfig.mcpClients) {
           try {
             await this.mcpProxy.connectClient(clientConfig);
-          } catch (error) {
+          } catch (error: any) {
             this.log(`Failed to connect MCP client ${clientConfig.name}:`, error);
           }
         }
@@ -1307,6 +1328,52 @@ export class RainfallDaemon {
       }
     });
 
+    // Rainline Proxy Injection Endpoint
+    this.openaiApp.post('/v1/proxy/extract', async (req: Request, res: Response) => {
+      try {
+        const { source, message, context } = req.body;
+        
+        if (!source) {
+          return res.status(400).json({ success: false, error: 'source domain required' });
+        }
+
+        this.log(`🌧️ Received proxy context from ${source} (${context?.length || 0} msgs)`);
+
+        // We broadcast this to the Tauri frontend via WebSocket so Rainline can react
+        this.wss?.clients.forEach(client => {
+          if (client.readyState === WebSocket.OPEN) {
+            client.send(JSON.stringify({
+              type: 'proxy_context',
+              source,
+              message,
+              context
+            }));
+          }
+        });
+
+        // We can also trigger local Rainline memory ingest here directly!
+        
+        const htmlResponse = `
+          <div style="border-left: 3px solid #ff1493; padding-left: 10px; margin-top: 10px; font-family: monospace;">
+            <strong>Rainline Local 🌧️</strong>
+            <p>Intercepted ${context?.length || 0} messages from ${source}.</p>
+            <p>Rainline Desktop is now aware of this context.</p>
+          </div>
+        `;
+
+        res.json({
+          success: true,
+          data: {
+            text: "Processed via Local Rainline Daemon",
+            html: htmlResponse
+          }
+        });
+      } catch (error) {
+        this.log(`Error processing proxy extract: ${error}`);
+        res.status(500).json({ success: false, error: String(error) });
+      }
+    });
+
     return new Promise((resolve) => {
       this.openaiApp.listen(this.openaiPort, () => {
         resolve();
@@ -2048,3 +2115,33 @@ export function getDaemonInstance(): RainfallDaemon | null {
 
 // Re-export MCP types for convenience
 export { MCPProxyHub, MCPClientConfig, MCPTransportType, MCPClientInfo, MCPToolInfo } from '../services/mcp-proxy.js';
+
+// CLI entrypoint when run as compiled binary (Bun or pkg). Handles flags passed
+// from Rust DaemonManager (.args(["--port", "8765", "--openai-port", "8787"])).
+if (require.main === module || (typeof Bun !== 'undefined' && Bun.main)) {
+  const argv = process.argv.slice(2);
+  let port = 8765;
+  let openaiPort = 8787;
+  let debug = process.env.RAINLINE_DEV_MODE === '1' || argv.includes('--debug');
+
+  const portIndex = argv.indexOf('--port');
+  if (portIndex !== -1 && portIndex + 1 < argv.length) {
+    port = parseInt(argv[portIndex + 1], 10);
+  }
+  const openaiPortIndex = argv.indexOf('--openai-port');
+  if (openaiPortIndex !== -1 && openaiPortIndex + 1 < argv.length) {
+    openaiPort = parseInt(argv[openaiPortIndex + 1], 10);
+  }
+
+  console.log(`🚀 Starting Rainfall Daemon with --port ${port} --openai-port ${openaiPort} (debug: ${debug})`);
+
+  startDaemon({
+    port,
+    openaiPort,
+    debug,
+    // In dev mode we use the test key via config
+  }).catch((err) => {
+    console.error('❌ Daemon startup failed:', err);
+    process.exit(1);
+  });
+}
