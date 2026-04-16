@@ -59,6 +59,25 @@ export interface NetworkedExecutorOptions {
   onEdgeNodeRegistered?: (edgeNodeId: string) => void;
 }
 
+export interface EdgeNodeMetrics {
+  /** Last heartbeat latency in ms */
+  heartbeatLatencyMs: number;
+  /** Average heartbeat latency over last 10 samples */
+  avgHeartbeatLatencyMs: number;
+  /** Current queue depth (pending job callbacks) */
+  queueDepth: number;
+  /** Total jobs claimed since startup */
+  totalJobsClaimed: number;
+  /** Total jobs completed since startup */
+  totalJobsCompleted: number;
+  /** Total jobs failed since startup */
+  totalJobsFailed: number;
+  /** Timestamp of last successful heartbeat */
+  lastHeartbeatAt: string | null;
+  /** Timestamp of last job claim */
+  lastJobClaimedAt: string | null;
+}
+
 export class RainfallNetworkedExecutor {
   private rainfall: Rainfall;
   private options: NetworkedExecutorOptions;
@@ -68,6 +87,14 @@ export class RainfallNetworkedExecutor {
   private jobClaimInterval?: NodeJS.Timeout;
   private isClaiming = false;
   private jobExecutor?: (toolId: string, params: Record<string, unknown>) => Promise<unknown>;
+
+  // Edge node metrics
+  private heartbeatLatencies: number[] = [];
+  private totalJobsClaimed = 0;
+  private totalJobsCompleted = 0;
+  private totalJobsFailed = 0;
+  private lastHeartbeatAt: string | null = null;
+  private lastJobClaimedAt: string | null = null;
 
   constructor(rainfall: Rainfall, options: NetworkedExecutorOptions = {}) {
     this.rainfall = rainfall;
@@ -158,21 +185,31 @@ export class RainfallNetworkedExecutor {
       clearInterval(this.heartbeatInterval);
     }
     
-    // Send heartbeat every 60 seconds (TTL is 2 minutes, so this is safe)
+    // Send heartbeat every 20 seconds (TTL is 2 minutes, aggressive polling for faster failure detection)
     this.heartbeatInterval = setInterval(async () => {
       if (!this.edgeNodeId) return;
       
+      const startTime = Date.now();
       try {
         await this.rainfall.executeTool('edge-node-heartbeat', {
           edgeNodeId: this.edgeNodeId,
           activeJobs: this.jobCallbacks.size,
-          queueDepth: 0,
+          queueDepth: this.jobCallbacks.size,
+          metrics: this.getMetrics(),
         });
+
+        // Track heartbeat latency
+        const latency = Date.now() - startTime;
+        this.heartbeatLatencies.push(latency);
+        if (this.heartbeatLatencies.length > 10) {
+          this.heartbeatLatencies.shift();
+        }
+        this.lastHeartbeatAt = new Date().toISOString();
       } catch (error) {
         // Heartbeat failed - edge node may have expired
         console.warn(`⚠️  Edge node heartbeat failed: ${error instanceof Error ? error.message : String(error)}`);
       }
-    }, 60000);
+    }, 20000);
   }
 
   /**
@@ -356,6 +393,8 @@ export class RainfallNetworkedExecutor {
         const job = await this.claimJob();
         
         if (job) {
+          this.totalJobsClaimed++;
+          this.lastJobClaimedAt = new Date().toISOString();
           console.log(`📥 Claimed job ${job.jobId} for tool ${job.toolId}`);
           
           try {
@@ -364,10 +403,12 @@ export class RainfallNetworkedExecutor {
             
             // Submit the result
             await this.submitJobResult(job.jobId, result);
+            this.totalJobsCompleted++;
             console.log(`✅ Completed job ${job.jobId}`);
           } catch (error) {
             const errorMessage = error instanceof Error ? error.message : String(error);
             await this.submitJobResult(job.jobId, null, errorMessage);
+            this.totalJobsFailed++;
             console.log(`❌ Failed job ${job.jobId}: ${errorMessage}`);
           }
         }
@@ -442,6 +483,26 @@ export class RainfallNetworkedExecutor {
    */
   getEdgeNodeId(): string | undefined {
     return this.edgeNodeId;
+  }
+
+  /**
+   * Get edge node metrics for observability
+   */
+  getMetrics(): EdgeNodeMetrics {
+    const avgLatency = this.heartbeatLatencies.length > 0
+      ? this.heartbeatLatencies.reduce((a, b) => a + b, 0) / this.heartbeatLatencies.length
+      : 0;
+
+    return {
+      heartbeatLatencyMs: this.heartbeatLatencies[this.heartbeatLatencies.length - 1] || 0,
+      avgHeartbeatLatencyMs: Math.round(avgLatency),
+      queueDepth: this.jobCallbacks.size,
+      totalJobsClaimed: this.totalJobsClaimed,
+      totalJobsCompleted: this.totalJobsCompleted,
+      totalJobsFailed: this.totalJobsFailed,
+      lastHeartbeatAt: this.lastHeartbeatAt,
+      lastJobClaimedAt: this.lastJobClaimedAt,
+    };
   }
 
   /**

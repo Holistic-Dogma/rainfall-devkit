@@ -143,6 +143,16 @@ export interface DaemonStatus {
   mcpTools?: number;
   clientsConnected: number;
   edgeNodeId?: string;
+  edgeMetrics?: {
+    heartbeatLatencyMs: number;
+    avgHeartbeatLatencyMs: number;
+    queueDepth: number;
+    totalJobsClaimed: number;
+    totalJobsCompleted: number;
+    totalJobsFailed: number;
+    lastHeartbeatAt: string | null;
+    lastJobClaimedAt: string | null;
+  } | null;
   context: {
     memoriesCached: number;
     activeSessions: number;
@@ -259,41 +269,60 @@ export class RainfallDaemon {
       },
     });
 
-    // Register edge node with Rainfall backend
-    await this.networkedExecutor.registerEdgeNode();
+    // Register edge node with Rainfall backend (non-fatal for local-only usage)
+    let edgeNodeRegistered = false;
+    try {
+      await this.networkedExecutor.registerEdgeNode();
+      edgeNodeRegistered = true;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.log(`⚠️  Edge node registration failed: ${message}. Continuing in local-only mode.`);
+    }
 
-    // Subscribe to job results
-    await this.networkedExecutor.subscribeToResults((jobId, result: any, error?: Error|string) => {
-      this.log(`📬 Job ${jobId} ${error ? 'failed' : 'completed'}`, error || result);
-    });
-
-    // Start polling for jobs to execute
-    this.networkedExecutor.startJobPolling(async (toolId, params) => {
-      this.log(`🔧 Executing job: ${toolId}`);
-      const startTime = Date.now();
-      
+    if (edgeNodeRegistered) {
+      // Subscribe to job results
       try {
-        const result = await this.executeLocalTool?.(toolId, params);
-        const duration = Date.now() - startTime;
-        
-        // Record execution in context
-        if (this.context) {
-          this.context.recordExecution(toolId, params, result, { duration });
-        }
-        
-        return result;
+        await this.networkedExecutor.subscribeToResults((jobId, result: any, error?: Error|string) => {
+          this.log(`📬 Job ${jobId} ${error ? 'failed' : 'completed'}`, error || result);
+        });
       } catch (error) {
-        const duration = Date.now() - startTime;
-        const errorMessage = error instanceof Error ? error.message : String(error);
-        
-        // Record failed execution
-        if (this.context) {
-          this.context.recordExecution(toolId, params, null, { error: errorMessage, duration });
-        }
-        
-        throw error;
+        const message = error instanceof Error ? error.message : String(error);
+        this.log(`⚠️  Failed to subscribe to job results: ${message}`);
       }
-    });
+
+      // Start polling for jobs to execute
+      try {
+        this.networkedExecutor.startJobPolling(async (toolId, params) => {
+          this.log(`🔧 Executing job: ${toolId}`);
+          const startTime = Date.now();
+          
+          try {
+            const result = await this.executeLocalTool?.(toolId, params);
+            const duration = Date.now() - startTime;
+            
+            // Record execution in context
+            if (this.context) {
+              this.context.recordExecution(toolId, params, result, { duration });
+            }
+            
+            return result;
+          } catch (error) {
+            const duration = Date.now() - startTime;
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            
+            // Record failed execution
+            if (this.context) {
+              this.context.recordExecution(toolId, params, null, { error: errorMessage, duration });
+            }
+            
+            throw error;
+          }
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.log(`⚠️  Failed to start job polling: ${message}`);
+      }
+    }
 
     // Initialize listener registry
     this.listeners = new RainfallListenerRegistry(
@@ -968,6 +997,7 @@ export class RainfallDaemon {
     // Health check endpoint
     this.openaiApp.get('/health', (_req: Request, res: Response) => {
       const mcpStats = this.mcpProxy?.getStats();
+      const edgeMetrics = this.networkedExecutor?.getMetrics();
       res.json({
         status: 'ok',
         daemon: 'rainfall',
@@ -978,6 +1008,7 @@ export class RainfallDaemon {
         mcp_tools: mcpStats?.totalTools || 0,
         edge_node_id: this.networkedExecutor?.getEdgeNodeId(),
         clients_connected: this.clients.size,
+        edge_metrics: edgeMetrics || null,
       });
     });
 
@@ -1717,7 +1748,7 @@ export class RainfallDaemon {
     console.log(`[LLM ROUTE] provider=${resolvedProvider} model=${resolvedModel} timestamp=${new Date().toISOString()}`);
 
     // Check if this is a known built-in provider
-    const knownProviders = ['local', 'ollama', 'custom', 'openai', 'anthropic', 'rainfall'];
+    const knownProviders = ['local', 'ollama', 'custom', 'openai', 'anthropic', 'rainfall', 'lmstudio'];
     const isKnownProvider = knownProviders.includes(resolvedProvider);
 
     // For known providers, use the existing routing logic
@@ -1742,6 +1773,7 @@ export class RainfallDaemon {
       case 'local':
       case 'ollama':
       case 'custom':
+      case 'lmstudio':
         return this.callLocalLLM({ ...params, model: resolvedModel }, config);
 
       case 'openai':
@@ -2053,6 +2085,7 @@ export class RainfallDaemon {
       localFunctionsLoaded: this.localFunctions.size,
       clientsConnected: this.clients.size,
       edgeNodeId: this.networkedExecutor?.getEdgeNodeId(),
+      edgeMetrics: this.networkedExecutor?.getMetrics() || null,
       context: this.context?.getStatus() || {
         memoriesCached: 0,
         activeSessions: 0,
@@ -2115,6 +2148,7 @@ export function getDaemonInstance(): RainfallDaemon | null {
 
 // Re-export MCP types for convenience
 export { MCPProxyHub, MCPClientConfig, MCPTransportType, MCPClientInfo, MCPToolInfo } from '../services/mcp-proxy.js';
+export { EdgeNodeMetrics } from '../services/networked.js';
 
 // CLI entrypoint when run as compiled binary (Bun or pkg). Handles flags passed
 // from Rust DaemonManager (.args(["--port", "8765", "--openai-port", "8787"])).
