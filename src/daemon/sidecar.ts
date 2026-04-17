@@ -108,7 +108,7 @@ Environment variables override CLI arguments.
       rainfallConfig: apiKey ? { apiKey } : undefined,
       providerApiKeys: Object.keys(providerApiKeys).length > 0 ? providerApiKeys : undefined
     });
-    console.log(`[sidecar] Daemon ready - WebSocket: ${port || 8765}, OpenAI proxy: ${openaiPort || 8787}`);
+    console.log(`[sidecar] ✅ Daemon ready - WebSocket: ${port || 8765}, OpenAI proxy: ${openaiPort || 8787}`);
     
     // Keep the process alive
     await new Promise(() => {});

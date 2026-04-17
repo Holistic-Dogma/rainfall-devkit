@@ -196,6 +196,9 @@ export class RainfallDaemon {
   
   // Provider API keys passed from parent process (e.g., Tauri sidecar)
   private providerApiKeys: Record<string, string> = {};
+  
+  // Cached subscriber ID (to avoid repeated getMe() calls that hit rate limits)
+  private subscriberId?: string;
 
   constructor(config: DaemonConfig = {}) {
     this.port = config.port || 8765;
@@ -232,161 +235,234 @@ export class RainfallDaemon {
   async start(): Promise<void> {
     this.log('🌧️  Rainfall Daemon starting...');
 
-    // Initialize Rainfall SDK
-    await this.initializeRainfall();
-    if (!this.rainfall) {
-      throw new Error('Failed to initialize Rainfall SDK');
-    }
+    // STEP 1: Start HTTP servers FIRST (before any API calls)
+    // This ensures servers are listening even if API calls fail
+    this.log('🔌 Starting WebSocket server...');
+    await this.startWebSocketServer();
+    this.log(`✅ WebSocket server listening on port ${this.port}`);
 
-    // Initialize context (persistent memory)
-    this.context = new RainfallDaemonContext(this.rainfall, {
-      maxLocalMemories: 1000,
-      maxMessageHistory: 100,
-      ...this.rainfallConfig,
-    });
-    await this.context.initialize();
+    this.log(`🌐 Starting OpenAI proxy on port ${this.openaiPort}...`);
+    await this.startOpenAIProxy();
+    this.log(`✅ OpenAI proxy listening on port ${this.openaiPort}`);
 
-    // Load config to get existing edge node ID
-    const { loadConfig, saveConfig } = await import('../cli/config.js');
-    const config = loadConfig();
-
-    // Initialize networked executor
-    this.networkedExecutor = new RainfallNetworkedExecutor(this.rainfall, {
-      wsPort: this.port,
-      httpPort: this.openaiPort,
-      hostname: process.env.HOSTNAME || 'local-daemon',
-      capabilities: {
-        localExec: true,
-        fileWatch: true,
-        passiveListen: true,
-      },
-      edgeNodeId: config.edgeNodeId, // Pass existing edge node ID from config
-      onEdgeNodeRegistered: (edgeNodeId: string) => {
-        // Save new edge node ID to config
-        config.edgeNodeId = edgeNodeId;
-        saveConfig(config);
-        this.log(`💾 Saved edge node ID to config: ${edgeNodeId}`);
-      },
-    });
-
-    // Register edge node with Rainfall backend (non-fatal for local-only usage)
-    let edgeNodeRegistered = false;
+    // STEP 2: Initialize Rainfall SDK (can fail, won't affect servers)
     try {
-      await this.networkedExecutor.registerEdgeNode();
-      edgeNodeRegistered = true;
+      this.log('🔧 Initializing Rainfall SDK...');
+      await this.initializeRainfall();
+      if (!this.rainfall) {
+        throw new Error('Failed to initialize Rainfall SDK');
+      }
+      this.log('✅ Rainfall SDK initialized');
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      this.log(`⚠️  Edge node registration failed: ${message}. Continuing in local-only mode.`);
+      this.log(`⚠️  Rainfall SDK initialization failed: ${message}. Running in degraded mode.`);
+      // Continue anyway - servers are already running
     }
 
-    if (edgeNodeRegistered) {
-      // Subscribe to job results
+    // STEP 3: Initialize context (persistent memory)
+    try {
+      if (this.rainfall) {
+        this.log('💾 Initializing persistent memory context...');
+        this.context = new RainfallDaemonContext(this.rainfall, {
+          maxLocalMemories: 1000,
+          maxMessageHistory: 100,
+          ...this.rainfallConfig,
+        });
+        await this.context.initialize();
+        this.log('✅ Persistent memory context initialized');
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.log(`⚠️  Context initialization failed: ${message}. Running without persistent memory.`);
+    }
+
+    // STEP 4: Load config and initialize networked executor (can fail)
+    try {
+      if (this.rainfall) {
+        this.log('📡 Loading configuration...');
+        const { loadConfig, saveConfig } = await import('../cli/config.js');
+        const config = loadConfig();
+
+        this.networkedExecutor = new RainfallNetworkedExecutor(this.rainfall, {
+          wsPort: this.port,
+          httpPort: this.openaiPort,
+          hostname: process.env.HOSTNAME || 'local-daemon',
+          capabilities: {
+            localExec: true,
+            fileWatch: true,
+            passiveListen: true,
+          },
+          edgeNodeId: config.edgeNodeId,
+          onEdgeNodeRegistered: (edgeNodeId: string) => {
+            config.edgeNodeId = edgeNodeId;
+            saveConfig(config);
+            this.log(`💾 Saved edge node ID to config: ${edgeNodeId}`);
+          },
+        });
+        this.log('✅ Networked executor initialized');
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.log(`⚠️  Networked executor initialization failed: ${message}. Running in local-only mode.`);
+    }
+
+    // STEP 5: Register edge node (non-fatal)
+    let edgeNodeRegistered = false;
+    if (this.networkedExecutor) {
       try {
+        this.log('🌐 Registering edge node with Rainfall backend...');
+        await this.networkedExecutor.registerEdgeNode();
+        edgeNodeRegistered = true;
+        this.log('✅ Edge node registered');
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.log(`⚠️  Edge node registration failed: ${message}. Continuing in local-only mode.`);
+      }
+    }
+
+    // STEP 6: Subscribe to job results and start polling (if edge node registered)
+    if (edgeNodeRegistered && this.networkedExecutor) {
+      try {
+        this.log('📬 Subscribing to job results...');
         await this.networkedExecutor.subscribeToResults((jobId, result: any, error?: Error|string) => {
           this.log(`📬 Job ${jobId} ${error ? 'failed' : 'completed'}`, error || result);
         });
+        this.log('✅ Job results subscription active');
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         this.log(`⚠️  Failed to subscribe to job results: ${message}`);
       }
 
-      // Start polling for jobs to execute
       try {
+        this.log('🔄 Starting job polling...');
         this.networkedExecutor.startJobPolling(async (toolId, params) => {
           this.log(`🔧 Executing job: ${toolId}`);
           const startTime = Date.now();
-          
+
           try {
             const result = await this.executeLocalTool?.(toolId, params);
             const duration = Date.now() - startTime;
-            
-            // Record execution in context
+
             if (this.context) {
               this.context.recordExecution(toolId, params, result, { duration });
             }
-            
+
             return result;
           } catch (error) {
             const duration = Date.now() - startTime;
             const errorMessage = error instanceof Error ? error.message : String(error);
-            
-            // Record failed execution
+
             if (this.context) {
               this.context.recordExecution(toolId, params, null, { error: errorMessage, duration });
             }
-            
+
             throw error;
           }
         });
+        this.log('✅ Job polling started');
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         this.log(`⚠️  Failed to start job polling: ${message}`);
       }
     }
 
-    // Initialize listener registry
-    this.listeners = new RainfallListenerRegistry(
-      this.rainfall,
-      this.context,
-      this.networkedExecutor
-    );
+    // STEP 7: Initialize listener registry
+    try {
+      if (this.rainfall) {
+        this.log('👂 Initializing listener registry...');
+        this.listeners = new RainfallListenerRegistry(
+          this.rainfall,
+          this.context || {} as RainfallDaemonContext,
+          this.networkedExecutor || {} as RainfallNetworkedExecutor
+        );
+        this.log('✅ Listener registry initialized');
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.log(`⚠️  Listener registry initialization failed: ${message}. Running without listeners.`);
+    }
 
-    // Load all available tools
-    await this.loadTools();
+    // STEP 8: Load tools
+    try {
+      this.log('🔨 Loading tools...');
+      await this.loadTools();
+      this.log(`✅ Tools loaded: ${this.tools.length}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.log(`⚠️  Failed to load tools: ${message}. Running with empty tool set.`);
+    }
 
-    // Initialize MCP Proxy Hub
+    // STEP 9: Initialize MCP Proxy Hub (can fail)
     if (this.enableMcpProxy) {
-      this.mcpProxy = new MCPProxyHub({ debug: this.debug });
-      await this.mcpProxy.initialize();
+      try {
+        this.log('🔌 Initializing MCP Proxy Hub...');
+        this.mcpProxy = new MCPProxyHub({ debug: this.debug });
+        await this.mcpProxy.initialize();
+        this.log('✅ MCP Proxy Hub initialized');
 
-      // Connect pre-configured MCP clients
-      if (this.rainfallConfig?.mcpClients) {
-        for (const clientConfig of this.rainfallConfig.mcpClients) {
-          try {
-            await this.mcpProxy.connectClient(clientConfig);
-          } catch (error: any) {
-            this.log(`Failed to connect MCP client ${clientConfig.name}:`, error);
+        if (this.rainfallConfig?.mcpClients) {
+          this.log(`🔗 Connecting ${this.rainfallConfig.mcpClients.length} pre-configured MCP clients...`);
+          for (const clientConfig of this.rainfallConfig.mcpClients) {
+            try {
+              await this.mcpProxy.connectClient(clientConfig);
+              this.log(`✅ Connected MCP client: ${clientConfig.name}`);
+            } catch (error: any) {
+              this.log(`⚠️  Failed to connect MCP client ${clientConfig.name}:`, error);
+            }
           }
         }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.log(`⚠️  MCP Proxy Hub initialization failed: ${message}. Running without MCP support.`);
       }
     }
 
-    // Initialize task poller for structured job queue
-    this.taskPoller = new TaskPoller(
-      this.rainfall,
-      this.localFunctions,
-      {
-        pollInterval: 5000,
-        maxConcurrent: 3,
-        debug: this.debug,
+    // STEP 10: Initialize task poller (can fail)
+    try {
+      if (this.rainfall) {
+        this.log('📋 Initializing task poller...');
+        this.taskPoller = new TaskPoller(
+          this.rainfall,
+          this.localFunctions,
+          {
+            pollInterval: 5000,
+            maxConcurrent: 3,
+            debug: this.debug,
+          }
+        );
+        await this.taskPoller.initialize();
+        this.taskPoller.start();
+        this.log('✅ Task poller started');
       }
-    );
-    await this.taskPoller.initialize();
-    this.taskPoller.start();
-    this.log('📋 Task poller started');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.log(`⚠️  Task poller initialization failed: ${message}. Running without task polling.`);
+    }
 
-    // Initialize tool registry (loads from backend + local sources)
-    this.toolRegistry = new ToolRegistry({
-      rainfall: this.rainfall,
-      mcpProxy: this.mcpProxy,
-      refreshIntervalMs: 60000, // Refresh every minute
-      debug: this.debug,
-    });
-    await this.toolRegistry.refresh();
-    this.log(`🧰 Tool registry loaded with ${this.toolRegistry.getTools().length} tools`);
+    // STEP 11: Initialize tool registry (can fail)
+    try {
+      if (this.rainfall) {
+        this.log('🧰 Initializing tool registry...');
+        this.toolRegistry = new ToolRegistry({
+          rainfall: this.rainfall,
+          mcpProxy: this.mcpProxy,
+          refreshIntervalMs: 300000, // Increased to 5 minutes to avoid rate limiting
+          debug: this.debug,
+        });
+        await this.toolRegistry.refresh();
+        this.log(`✅ Tool registry loaded with ${this.toolRegistry.getTools().length} tools`);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.log(`⚠️  Tool registry initialization failed: ${message}. Running without tool registry.`);
+    }
 
-    // Start WebSocket server for MCP
-    await this.startWebSocketServer();
-
-    // Start OpenAI-compatible HTTP server
-    await this.startOpenAIProxy();
-
-    // Log startup info
+    // STEP 12: Log final startup status
     console.log(`🚀 Rainfall daemon running`);
     console.log(`   WebSocket (MCP):     ws://localhost:${this.port}`);
     console.log(`   OpenAI API:          http://localhost:${this.openaiPort}/v1/chat/completions`);
     console.log(`   Health Check:        http://localhost:${this.openaiPort}/health`);
-    console.log(`   Edge Node ID:        ${this.networkedExecutor.getEdgeNodeId() || 'local'}`);
+    console.log(`   Edge Node ID:        ${this.networkedExecutor?.getEdgeNodeId() || 'local'}`);
     console.log(`   Tools loaded:        ${this.tools.length}`);
     console.log(`   Press Ctrl+C to stop`);
 
@@ -503,6 +579,16 @@ export class RainfallDaemon {
         throw new Error('No API key configured. Run: rainfall auth login <api-key>');
       }
     }
+    
+    // Cache subscriber ID to avoid repeated getMe() calls that hit rate limits
+    try {
+      const me = await this.rainfall.getMe();
+      this.subscriberId = me.id;
+      this.log(`👤 Cached subscriber ID: ${this.subscriberId}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.log(`⚠️  Failed to cache subscriber ID: ${message}. Will fetch on demand.`);
+    }
   }
 
   private async loadTools(): Promise<void> {
@@ -534,7 +620,13 @@ export class RainfallDaemon {
   }
 
   private async startWebSocketServer(): Promise<void> {
-    this.wss = new WebSocketServer({ port: this.port });
+    this.log(`🔗 Creating WebSocket server on port ${this.port}...`);
+    this.wss = new WebSocketServer({ port: this.port }, () => {
+      this.log(`✅ WebSocket server listening on port ${this.port}`);
+    });
+    this.wss.on('error', (err: any) => {
+      this.log(`❌ WebSocket server error on port ${this.port}: ${err.message}`);
+    });
 
     this.wss.on('connection', (ws: WebSocket) => {
       this.log('🟢 MCP client connected');
@@ -762,6 +854,20 @@ export class RainfallDaemon {
   }
 
   private async startOpenAIProxy(): Promise<void> {
+    // Health check endpoint - always responds (doesn't depend on APIs)
+    this.openaiApp.get('/health', (_req: Request, res: Response) => {
+      res.json({
+        status: 'ok',
+        daemon: 'rainfall',
+        version: '0.2.0',
+        timestamp: new Date().toISOString(),
+        ports: {
+          websocket: this.port,
+          openai: this.openaiPort,
+        },
+      });
+    });
+
     // List models endpoint - proxy to Rainyday backend
     this.openaiApp.get('/v1/models', async (_req: Request, res: Response) => {
       try {
@@ -820,9 +926,15 @@ export class RainfallDaemon {
       }
 
       try {
-        // Get subscriber ID from SDK
-        const me = await this.rainfall.getMe();
-        const subscriberId = me.id;
+        // Get subscriber ID from cache or fetch it if not cached
+        let subscriberId: string;
+        if (this.subscriberId) {
+          subscriberId = this.subscriberId;
+        } else {
+          const me = await this.rainfall.getMe();
+          subscriberId = me.id;
+          this.subscriberId = subscriberId; // Cache for future use
+        }
 
         // Build local tool map for quick lookup (for execution)
         const localToolMap = await this.buildLocalToolMap();
@@ -1185,9 +1297,15 @@ export class RainfallDaemon {
           },
         }));
 
-        // Get subscriber ID
-        const me = await this.rainfall.getMe();
-        const subscriberId = me.id;
+        // Get subscriber ID from cache or fetch it if not cached
+        let subscriberId: string;
+        if (this.subscriberId) {
+          subscriberId = this.subscriberId;
+        } else {
+          const me = await this.rainfall.getMe();
+          subscriberId = me.id;
+          this.subscriberId = subscriberId; // Cache for future use
+        }
 
         // Build local tool map for quick lookup
         const localToolMap = await this.buildLocalToolMap();
@@ -1405,10 +1523,21 @@ export class RainfallDaemon {
       }
     });
 
-    return new Promise((resolve) => {
-      this.openaiApp.listen(this.openaiPort, () => {
-        resolve();
-      });
+    return new Promise((resolve, reject) => {
+      try {
+        this.log(`🔔 Attempting to bind OpenAI proxy to port ${this.openaiPort}...`);
+        const server = this.openaiApp.listen(this.openaiPort, () => {
+          this.log(`✅ OpenAI proxy successfully listening on port ${this.openaiPort}`);
+          resolve();
+        });
+        server.on('error', (err: any) => {
+          this.log(`❌ OpenAI proxy error on port ${this.openaiPort}: ${err.message}`);
+          reject(err);
+        });
+      } catch (error) {
+        this.log(`❌ Failed to start OpenAI proxy: ${error}`);
+        reject(error);
+      }
     });
   }
 
