@@ -14,6 +14,8 @@ import { WebSocketServer, WebSocket } from 'ws';
 import express, { Request, Response } from 'express';
 import cors from 'cors';
 import { join } from 'path';
+import { exec } from 'child_process';
+import { promisify } from 'util';
 import { Rainfall } from '../sdk.js';
 import { RainfallConfig } from '../types.js';
 import { RainfallNetworkedExecutor, NetworkedExecutorOptions } from '../services/networked.js';
@@ -335,6 +337,16 @@ export class RainfallDaemon {
 
       try {
         this.log('🔄 Starting job polling...');
+        // SOVEREIGNTY CANON (S-64, 2026-09-24, night dispatch 1):
+        // Remote Rainfall jobs are routed through executeLocalTool, NOT
+        // executeToolWithMCP. This is deliberate. MCP-proxied tools
+        // (chrome, local device integrations) are LOCAL device surface and
+        // must not be reachable from remote Rainfall job dispatchers
+        // without explicit per-tool consent. The cascade in
+        // executeToolWithMCP is reserved for local callers (OpenAI proxy,
+        // direct MCP clients). See docs/agents/atlas/devkit-architecture.md
+        // "Sovereignty Canon: edge job execution boundary" for the full
+        // ruling and threat model.
         this.networkedExecutor.startJobPolling(async (toolId, params) => {
           this.log(`🔧 Executing job: ${toolId}`);
           const startTime = Date.now();
@@ -457,7 +469,10 @@ export class RainfallDaemon {
       this.log(`⚠️  Tool registry initialization failed: ${message}. Running without tool registry.`);
     }
 
-    // STEP 12: Log final startup status
+    // STEP 12: Register built-in local functions
+    this.registerBuiltinLocalFunctions();
+
+    // STEP 13: Log final startup status
     console.log(`🚀 Rainfall daemon running`);
     console.log(`   WebSocket (MCP):     ws://localhost:${this.port}`);
     console.log(`   OpenAI API:          http://localhost:${this.openaiPort}/v1/chat/completions`);
@@ -1588,6 +1603,58 @@ export class RainfallDaemon {
   }
 
   /**
+   * Register built-in local functions (bash_execute, etc.)
+   */
+  private registerBuiltinLocalFunctions(): void {
+    const execAsync = promisify(exec);
+
+    // bash_execute — the universal solvent
+    this.localFunctions.set('bash_execute', {
+      name: 'bash_execute',
+      description: 'Execute a bash command on the local machine. Returns stdout, stderr, and exit code.',
+      schema: {
+        type: 'object',
+        properties: {
+          command: { type: 'string', description: 'The bash command to execute' },
+          timeout: {
+            type: 'number',
+            description: 'Timeout in seconds (default: 30)',
+            default: 30,
+          },
+        },
+        required: ['command'],
+      },
+      execute: async (params: Record<string, unknown>) => {
+        const command = params.command as string;
+        const timeoutMs = ((params.timeout as number) || 30) * 1000;
+
+        if (!command || typeof command !== 'string') {
+          throw new Error('Missing required parameter: command');
+        }
+
+        try {
+          const { stdout, stderr } = await execAsync(command, { timeout: timeoutMs });
+          return {
+            stdout: stdout || '',
+            stderr: stderr || '',
+            exitCode: 0,
+            timedOut: false,
+          };
+        } catch (error: any) {
+          return {
+            stdout: error.stdout || '',
+            stderr: error.stderr || error.message || '',
+            exitCode: error.code || 1,
+            timedOut: error.killed || false,
+          };
+        }
+      },
+    });
+
+    this.log(`📦 Registered built-in local functions: bash_execute`);
+  }
+
+  /**
    * Load a local function module from disk
    */
   async loadLocalFunction(
@@ -1693,7 +1760,22 @@ export class RainfallDaemon {
   }
 
   /**
-   * Execute a local Rainfall tool
+   * Execute a tool routed by the local daemon.
+   *
+   * SOVEREIGNTY CANON (S-64, 2026-09-24, night dispatch 1):
+   * This function deliberately does NOT consult `this.mcpProxy`. It checks
+   * `localFunctions` (user-uploaded JS modules) and falls through to the
+   * Rainfall backend. The MCP-proxy cascade lives in `executeToolWithMCP`
+   * and is reserved for LOCAL callers (OpenAI proxy path, direct MCP
+   * clients). Reason: MCP-proxied tools reach into local device surface
+   * (browser, files, etc.); exposing them to remote Rainfall job
+   * dispatchers would extend the trust boundary of "what runs on this
+   * machine" to anyone with valid Rainfall credentials, without explicit
+   * consent. See README "Sovereignty Canon: edge job execution boundary".
+   *
+   * Future work: if remote invocation of a specific MCP tool is desired,
+   * gate it with explicit consent (e.g., per-tool `remoteAllowed: true` on
+   * MCP client config or per-function opt-in) — Crown territory.
    */
   private async executeLocalTool(toolId: string, args: Record<string, unknown>): Promise<unknown> {
     // Check local functions first
