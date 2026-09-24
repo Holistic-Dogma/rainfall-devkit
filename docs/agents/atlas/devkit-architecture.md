@@ -1,7 +1,7 @@
 # Rainfall DevKit Architecture Atlas 🗺️
 
 **Source:** `/Users/fall/Code/pragma-digital/olympic/rainfall-devkit`
-**Last Updated:** 2026-04-13 (Sprint 1.5 - Acceleration Phase)
+**Last Updated:** 2026-09-24 (S-64 night dispatch 1 — Sovereignty Canon added)
 **Target Readers:** System Architect + Marketing Agent
 **Package:** `@rainfall-devkit/sdk` v0.2.18
 
@@ -443,6 +443,62 @@ this.openaiApp.post('/v1/chat/completions', async (req, res) => {
   res.json(response);
 });
 ```
+
+---
+
+## 🛡️ Sovereignty Canon: Edge Job Execution Boundary
+
+**Ratified:** 2026-09-24 (S-64, night dispatch 1, re-fire)
+**Status:** Active — enforced in `src/daemon/index.ts` STEP 6 job polling and `executeLocalTool()`
+**Crown territory:** Any change to the routing rule, the consent gate, or the per-tool allow-list must route through Fall + Calliope for approval.
+
+### The Law
+
+When a *remote* Rainfall job (dispatched via `networkedExecutor.startJobPolling`) lands on an edge daemon, the daemon executes it through `executeLocalTool`. **`executeLocalTool` deliberately does NOT consult `this.mcpProxy`.** The MCP-proxy cascade in `executeToolWithMCP` is reserved for **local callers only** (OpenAI proxy path, direct MCP clients).
+
+### Why the Boundary Exists
+
+The MCP-proxy hub reaches into local device surface:
+
+- **Browser control** (Chrome DevTools, page screenshots, form fills)
+- **File system access** (anything the daemon's UID can touch)
+- **Other MCP servers** the user has connected (Notion, Linear, GitHub, etc.)
+- **Anything a future MCP client brings into the daemon's namespace**
+
+If a remote Rainfall job could route through `executeToolWithMCP`, anyone with valid Rainfall credentials could:
+
+1. Trigger a job on the edge node claiming to be "list my GitHub repos."
+2. Have it dispatched to `executeToolWithMCP`.
+3. End up calling `github-list_repos` through the MCP proxy — but with the daemon's *local* GitHub credentials, not a remote job-scope token.
+4. Read/write the user's private repos, browser state, and files.
+
+This extends the trust boundary of "what runs on this machine" to anyone who can authenticate to the Rainfall backend. It does **not** require breaking into the daemon — the daemon would happily dispatch the request.
+
+### What `executeLocalTool` Sees
+
+`executeLocalTool` consults, in order:
+
+1. **`this.localFunctions`** — user-uploaded JS modules (via `expose-function`). These run with the daemon's UID, but the user explicitly chose to expose them and bundled a `bundleHash` so the daemon can verify integrity.
+2. **The Rainfall backend** — `this.executeTool(toolId, params)`. This is the canonical Rainfall tool registry. Tools here are server-side and remote-by-nature; calling them does not extend local trust.
+3. **Fall-through to Rainfall** — if neither matches, the backend is asked.
+
+Notably absent: `this.mcpProxy`.
+
+### Future Work (Crown Territory)
+
+If a user wants a *specific* MCP-proxied tool to be invokable from remote Rainfall jobs (e.g., a workflow that genuinely needs `chrome-screenshot` triggered remotely), the gate is:
+
+1. **Per-tool opt-in** on the MCP client config: `remoteAllowed: true` for the specific tool name.
+2. **Per-function consent** at expose time: a `remoteAllowed: true` flag in the `LocalFunctionDefinition` schema.
+3. **An audit log** of every remote invocation through the proxy, with operator-visible "X was invoked from Rainfall job Y" lines.
+
+Until any of those are implemented, **the boundary holds**. "Helpful" edits that route remote jobs through `executeToolWithMCP` are violations of the canon and must be reverted.
+
+### Code References
+
+- `src/daemon/index.ts` STEP 6 — `networkedExecutor.startJobPolling(async (toolId, params) => { await this.executeLocalTool?.(toolId, params); ... })` with the SOVEREIGNTY CANON comment block above it.
+- `src/daemon/index.ts` `executeLocalTool()` — the method whose doc comment carries the matching canon comment.
+- `src/cli/edge/expose-function.ts` — the surface that adds functions to `localFunctions` (the path that *is* explicitly allowed across the boundary).
 
 ---
 
