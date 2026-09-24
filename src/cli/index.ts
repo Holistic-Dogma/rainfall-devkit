@@ -1533,6 +1533,7 @@ async function edgeExposeFunction(args: string[]): Promise<void> {
   let file: string | undefined;
   let name: string | undefined;
   let port = 8787;
+  let allowStaleRegistry = false;
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -1543,12 +1544,14 @@ async function edgeExposeFunction(args: string[]): Promise<void> {
     } else if (arg === '--port' || arg === '-p') {
       const val = parseInt(args[++i], 10);
       if (!isNaN(val)) port = val;
+    } else if (arg === '--allow-stale-registry') {
+      allowStaleRegistry = true;
     }
   }
 
   if (!file || !name) {
     console.error('Error: --file and --name are required');
-    console.error('\nUsage: rainfall edge expose-function --file <path> --name <name> [--port <port>]');
+    console.error('\nUsage: rainfall edge expose-function --file <path> --name <name> [--port <port>] [--allow-stale-registry]');
     console.error('\nExample:');
     console.error('  rainfall edge expose-function --file ./tools/my-tool.ts --name my-tool');
     process.exit(1);
@@ -1557,7 +1560,12 @@ async function edgeExposeFunction(args: string[]): Promise<void> {
   const rainfall = getRainfall();
 
   try {
-    await exposeFunction({ file, name, port, rainfall });
+    const result = await exposeFunction({ file, name, port, rainfall, allowStaleRegistry });
+    // Central registry did not match local truth (or verify call failed) — the function
+    // works locally but /params will return stale data. Surface this to CI/scripts.
+    if (result.registryVerified === false) {
+      process.exit(2);
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.error('❌ Failed to expose function:', message);
