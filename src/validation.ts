@@ -52,8 +52,9 @@ export async function fetchToolSchema(
     return cached.schema;
   }
 
+  const subscriberId = await client.ensureSubscriberId();
   const response = await client.request<{ success: boolean; params: ToolParamsSchema }>(
-    `/olympic/subscribers/me/nodes/${toolId}/params`
+    `/olympic/subscribers/${subscriberId}/nodes/${toolId}/params`
   );
 
   if (!response.success || !response.params) {

@@ -351,7 +351,7 @@ export class RainfallClient {
   /**
    * Ensure we have a subscriber ID, fetching it if necessary
    */
-  private async ensureSubscriberId(): Promise<string> {
+  async ensureSubscriberId(): Promise<string> {
     if (this.subscriberId) {
       return this.subscriberId;
     }
