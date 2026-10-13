@@ -66,9 +66,14 @@ Commands:
   task list                     List all tasks
   task rm <id-or-name>          Remove a task
   
-  todos list                    Show your todo list (read-only)
-  todos token                   Show existing todo token (read-only)
-  todos init|add|check|uncheck|rm  SUPERSEDED — writes frozen (K11, 2026-10-13); use: lift tickets
+  todos init                    Initialize todo list access (mints token)
+  todos init --show-token       Initialize and display token for sharing
+  todos token                   Show existing todo token
+  todos list                    Show your todo list (default)
+  todos add <title>             Add a new todo item
+  todos check <id>              Mark todo as completed
+  todos uncheck <id>            Mark todo as not completed
+  todos rm <id>                 Remove a todo item
 
   version                       Show version information
   upgrade                       Upgrade to the latest version
@@ -1590,19 +1595,6 @@ interface TodosConfig {
 
 const TODOS_CONFIG_FILE = join(getConfigDir(), 'todos.json');
 
-const TODOS_SUPERSEDED_MESSAGE = [
-  '⚠️  `rainfall todos` is SUPERSEDED (K11 tickets-as-truth, frozen 2026-10-13).',
-  '    Write operations (init/add/check/uncheck/rm) are frozen.',
-  '    Task tracking lives on the tickets plane: use `lift tickets`.',
-  '    Reads (list/token) still work until the shim API retires (410 Gone).'
-].join('\n');
-
-const TODOS_WRITE_OPS = new Set(['init', 'add', 'check', 'uncheck', 'rm', 'remove']);
-
-function printTodosSupersededNotice(): void {
-  console.error(TODOS_SUPERSEDED_MESSAGE);
-}
-
 function loadTodosConfig(): TodosConfig {
   if (existsSync(TODOS_CONFIG_FILE)) {
     try {
@@ -1770,7 +1762,8 @@ async function todosList(args: string[]): Promise<void> {
     
     if (items.length === 0) {
       console.log('No todo items found.');
-      console.log('\nThe todos shim is frozen for writes — track new work with `lift tickets`.');
+      console.log('\nAdd your first todo:');
+      console.log('  rainfall todos add "Your task here"');
       return;
     }
     
@@ -2584,11 +2577,7 @@ async function main(): Promise<void> {
       break;
 
     case 'todos':
-      printTodosSupersededNotice();
-      if (TODOS_WRITE_OPS.has(subcommand ?? '')) {
-        process.exit(1);
-      }
-      switch (subcommand) {
+      switch (subcommand ?? 'list') {
         case 'init':
           await todosInit(rest);
           break;
@@ -2613,10 +2602,17 @@ async function main(): Promise<void> {
           break;
         default:
           console.error('Error: Unknown todos subcommand');
-          console.error('\nUsage: rainfall todos <list|token>   (writes frozen — use `lift tickets`)');
-          console.error('\nRead-only examples:');
-          console.error('  rainfall todos list                    # Show your todos');
+          console.error('\nUsage: rainfall todos <init|list|add|check|uncheck|rm|token>');
+          console.error('\nExamples:');
+          console.error('  rainfall todos init                    # Mint and store todo token');
+          console.error('  rainfall todos init --show-token       # Mint and display token for sharing');
           console.error('  rainfall todos token                   # Show existing token');
+          console.error('  rainfall todos list                    # Show your todos');
+          console.error('  rainfall todos add "Buy milk"          # Add a todo item');
+          console.error('  rainfall todos add "Review PR" --category work --visibility public');
+          console.error('  rainfall todos check 123e4567        # Mark as done (partial ID match)');
+          console.error('  rainfall todos uncheck "Buy milk"    # Mark as not done (title match)');
+          console.error('  rainfall todos rm 123e4567           # Remove a todo');
           process.exit(1);
       }
       break;
