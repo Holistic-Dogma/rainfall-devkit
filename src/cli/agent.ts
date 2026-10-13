@@ -298,9 +298,15 @@ export async function agentChat(args: string[]): Promise<void> {
 
             try {
               const parsed = JSON.parse(data);
-              const content = parsed.choices?.[0]?.delta?.content;
-              if (content) {
-                process.stdout.write(content);
+              const rawContent = parsed.choices?.[0]?.delta?.content;
+              if (typeof rawContent === "string") {
+                process.stdout.write(rawContent);
+              } else if (Array.isArray(rawContent)) {
+                for (const el of rawContent) {
+                  if (typeof el === "string") { process.stdout.write(el); continue; }
+                  if (el?.type === "text" && typeof el.text === "string") { process.stdout.write(el.text); continue; }
+                  // {type:"thinking"} — no reasoning channel in CLI, skip silently
+                }
               }
             } catch (e) {
               // Skip invalid JSON
@@ -375,10 +381,16 @@ export async function agentChat(args: string[]): Promise<void> {
 
               try {
                 const parsed = JSON.parse(data);
-                const content = parsed.choices?.[0]?.delta?.content;
-                if (content) {
-                  process.stdout.write(content);
-                  assistantMessage += content;
+                const rawContent = parsed.choices?.[0]?.delta?.content;
+                if (typeof rawContent === "string") {
+                  process.stdout.write(rawContent);
+                  assistantMessage += rawContent;
+                } else if (Array.isArray(rawContent)) {
+                  for (const el of rawContent) {
+                    if (typeof el === "string") { process.stdout.write(el); assistantMessage += el; continue; }
+                    if (el?.type === "text" && typeof el.text === "string") { process.stdout.write(el.text); assistantMessage += el.text; continue; }
+                    // {type:"thinking"} — no reasoning channel in CLI, skip silently
+                  }
                 }
               } catch (e) {
                 // Skip invalid JSON
