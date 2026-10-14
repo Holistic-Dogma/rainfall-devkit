@@ -36,7 +36,7 @@ The flow:
 CLI (master key)        mint token →  todos.json  ← user reads --show-token  →  web AI client
                                                                        │
                                                                        ↓  presents x-todo-token on every call
-                                                        https://olympic-api.pragma-digital.org/v1/olympic/subscribers/{subscriberId}/todos
+                                                        https://rainfall.pragma-digital.org/v1/olympic/subscribers/{subscriberId}/todos
 ```
 
 The AI client **cannot** mint new tokens (it has no master key), **cannot** reach any other endpoint (the backend authorizes each route by token scope), and **cannot** escalate (the token is short-lived and has only `['read', 'write']` capabilities on the todos route).
@@ -72,7 +72,7 @@ The most common reason a person types `rainfall todos` is to *see* their todos. 
 
 ## HTTP API contract
 
-All paths live under the versioned base `https://olympic-api.pragma-digital.org/v1`. The token is sent on every request as the `x-todo-token` header. `subscriberId` is the UUID returned by `/olympic/subscribers/me` at init time.
+All paths live under the versioned base `https://rainfall.pragma-digital.org/v1`. The token is sent on every request as the `x-todo-token` header. `subscriberId` is the UUID returned by `/olympic/subscribers/me` at init time.
 
 ### `POST /olympic/subscribers/{subscriberId}/account/todo-token`  *(master-key only)*
 

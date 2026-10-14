@@ -17,7 +17,7 @@ import {
   type ValidationResult 
 } from './validation.js';
 
-const DEFAULT_BASE_URL = 'https://olympic-api.pragma-digital.org/v1';
+const DEFAULT_BASE_URL = 'https://rainfall.pragma-digital.org/v1';
 const DEFAULT_TIMEOUT = 30000;
 const DEFAULT_RETRIES = 3;
 const DEFAULT_RETRY_DELAY = 1000;

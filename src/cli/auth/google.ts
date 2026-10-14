@@ -130,7 +130,7 @@ function startCallbackServer(port: number): Promise<{ success: boolean; credenti
  */
 function getBackendOAuthUrl(subscriberId: string, redirectUrl: string, scopes: string[]): string {
   const config = loadConfig();
-  const baseUrl = config.baseUrl || 'https://olympic-api.pragma-digital.org/v1';
+  const baseUrl = config.baseUrl || 'https://rainfall.pragma-digital.org/v1';
   
   // Build state parameter with redirect back to localhost
   const stateData = {
@@ -178,7 +178,7 @@ export async function getGoogleCredentialScopes(subscriberId: string): Promise<s
   }
   
   try {
-    const baseUrl = config.baseUrl || 'https://olympic-api.pragma-digital.org/v1';
+    const baseUrl = config.baseUrl || 'https://rainfall.pragma-digital.org/v1';
     const response = await fetch(`${baseUrl}/olympic/subscribers/${subscriberId}/account/credentials/scopes`, {
       headers: {
         'x-api-key': config.apiKey,
@@ -232,7 +232,7 @@ export async function getValidGoogleTokens(): Promise<GoogleTokens | null> {
     }
     
     // Fetch credentials from backend
-    const baseUrl = config.baseUrl || 'https://olympic-api.pragma-digital.org/v1';
+    const baseUrl = config.baseUrl || 'https://rainfall.pragma-digital.org/v1';
     const response = await fetch(`${baseUrl}/olympic/subscribers/${me.id}/account/credentials`, {
       headers: {
         'x-api-key': config.apiKey,
@@ -389,7 +389,7 @@ export async function logoutGoogle(): Promise<void> {
       const me = await rainfall.getMe();
       
       if (me.id) {
-        const baseUrl = config.baseUrl || 'https://olympic-api.pragma-digital.org/v1';
+        const baseUrl = config.baseUrl || 'https://rainfall.pragma-digital.org/v1';
         
         // First, find the credential
         const listResponse = await fetch(`${baseUrl}/olympic/subscribers/${me.id}/account/credentials`, {

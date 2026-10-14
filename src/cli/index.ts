@@ -192,7 +192,7 @@ function authLogout(): void {
 
 async function authStatus(): Promise<void> {
   const config = loadConfig();
-  const defaultBaseUrl = 'https://olympic-api.pragma-digital.org/v1';
+  const defaultBaseUrl = 'https://rainfall.pragma-digital.org/v1';
 
   if (!config.apiKey) {
     console.log('Not authenticated');
@@ -2046,7 +2046,7 @@ async function todosToken(): Promise<void> {
   console.log('─────────────────────────────────────────────────────────\n');
   console.log('Subscriber ID:', todosConfig.subscriberId);
   console.log('\nUse this token with web-agent platforms! Either as header or query parameter.');
-  console.log(`Visit https://olympic-api.pragma-digital.org/v1/olympic/subscribers/${todosConfig.subscriberId}/todos?token=${todosConfig.todoToken.slice(0, 20)}... (or paste it in to your favorite chat AI with web browsing capabilities).`)
+  console.log(`Visit https://rainfall.pragma-digital.org/v1/olympic/subscribers/${todosConfig.subscriberId}/todos?token=${todosConfig.todoToken.slice(0, 20)}... (or paste it in to your favorite chat AI with web browsing capabilities).`)
   console.log("You can also pass the token as an x-todo-token header to the API.")
 }
 

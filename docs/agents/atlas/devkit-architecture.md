@@ -102,7 +102,7 @@ Options for 'run':
 ```typescript
 export class RainfallClient {
   private apiKey: string;
-  private baseUrl: string = 'https://olympic-api.pragma-digital.org/v1';
+  private baseUrl: string = 'https://rainfall.pragma-digital.org/v1';
   
   async request<T>(path: string, options?: RequestInit): Promise<T> {
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
