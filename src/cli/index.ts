@@ -69,12 +69,12 @@ Commands:
   todos init                    Initialize todo list access (mints token)
   todos init --show-token       Initialize and display token for sharing
   todos token                   Show existing todo token
-  todos list                    Show your todo list
+  todos list                    Show your todo list (default)
   todos add <title>             Add a new todo item
   todos check <id>              Mark todo as completed
   todos uncheck <id>            Mark todo as not completed
   todos rm <id>                 Remove a todo item
-  
+
   version                       Show version information
   upgrade                       Upgrade to the latest version
   
@@ -192,7 +192,7 @@ function authLogout(): void {
 
 async function authStatus(): Promise<void> {
   const config = loadConfig();
-  const defaultBaseUrl = 'https://olympic-api.pragma-digital.org/v1';
+  const defaultBaseUrl = 'https://rainfall.pragma-digital.org/v1';
 
   if (!config.apiKey) {
     console.log('Not authenticated');
@@ -1533,6 +1533,7 @@ async function edgeExposeFunction(args: string[]): Promise<void> {
   let file: string | undefined;
   let name: string | undefined;
   let port = 8787;
+  let allowStaleRegistry = false;
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -1543,12 +1544,14 @@ async function edgeExposeFunction(args: string[]): Promise<void> {
     } else if (arg === '--port' || arg === '-p') {
       const val = parseInt(args[++i], 10);
       if (!isNaN(val)) port = val;
+    } else if (arg === '--allow-stale-registry') {
+      allowStaleRegistry = true;
     }
   }
 
   if (!file || !name) {
     console.error('Error: --file and --name are required');
-    console.error('\nUsage: rainfall edge expose-function --file <path> --name <name> [--port <port>]');
+    console.error('\nUsage: rainfall edge expose-function --file <path> --name <name> [--port <port>] [--allow-stale-registry]');
     console.error('\nExample:');
     console.error('  rainfall edge expose-function --file ./tools/my-tool.ts --name my-tool');
     process.exit(1);
@@ -1557,7 +1560,12 @@ async function edgeExposeFunction(args: string[]): Promise<void> {
   const rainfall = getRainfall();
 
   try {
-    await exposeFunction({ file, name, port, rainfall });
+    const result = await exposeFunction({ file, name, port, rainfall, allowStaleRegistry });
+    // Central registry did not match local truth (or verify call failed) — the function
+    // works locally but /params will return stale data. Surface this to CI/scripts.
+    if (result.registryVerified === false) {
+      process.exit(2);
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.error('❌ Failed to expose function:', message);
@@ -2038,7 +2046,7 @@ async function todosToken(): Promise<void> {
   console.log('─────────────────────────────────────────────────────────\n');
   console.log('Subscriber ID:', todosConfig.subscriberId);
   console.log('\nUse this token with web-agent platforms! Either as header or query parameter.');
-  console.log(`Visit https://olympic-api.pragma-digital.org/v1/olympic/subscribers/${todosConfig.subscriberId}/todos?token=${todosConfig.todoToken.slice(0, 20)}... (or paste it in to your favorite chat AI with web browsing capabilities).`)
+  console.log(`Visit https://rainfall.pragma-digital.org/v1/olympic/subscribers/${todosConfig.subscriberId}/todos?token=${todosConfig.todoToken.slice(0, 20)}... (or paste it in to your favorite chat AI with web browsing capabilities).`)
   console.log("You can also pass the token as an x-todo-token header to the API.")
 }
 
@@ -2569,7 +2577,7 @@ async function main(): Promise<void> {
       break;
 
     case 'todos':
-      switch (subcommand) {
+      switch (subcommand ?? 'list') {
         case 'init':
           await todosInit(rest);
           break;

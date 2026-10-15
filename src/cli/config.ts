@@ -129,7 +129,7 @@ export function getLLMConfig(config: Config): Required<LLMConfig> {
   const defaults: Required<LLMConfig> = {
     provider: 'rainfall',
     apiKey: config.apiKey || '',
-    baseUrl: config.baseUrl || 'https://api.rainfall.com',
+    baseUrl: config.baseUrl || 'https://rainfall.pragma-digital.org/v1',
     model: 'llama-3.3-70b-versatile',
     options: {},
   };
@@ -162,6 +162,6 @@ export function getProviderBaseUrl(config: Config): string {
       return config.llm?.baseUrl || 'http://localhost:1234/v1';
     case 'rainfall':
     default:
-      return config.baseUrl || 'https://api.rainfall.com';
+      return config.baseUrl || 'https://rainfall.pragma-digital.org/v1';
   }
 }

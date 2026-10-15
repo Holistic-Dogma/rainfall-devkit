@@ -18,6 +18,17 @@ export interface ExposeFunctionOptions {
   name: string;
   port?: number;
   rainfall: Rainfall;
+  /**
+   * If true, central schema-registration failure (step 5) and central
+   * registry verification (step 7) are downgraded from fatal to warn.
+   * The function will still work locally, but `/params` and downstream
+   * callers will see stale or missing schema. Use only when you
+   * understand the lag and have a plan to reconcile (e.g., offline
+   * registration, known transient backend propagation delay).
+   *
+   * Default: false (fail loud).
+   */
+  allowStaleRegistry?: boolean;
 }
 
 export interface ExposeFunctionResult {
@@ -25,6 +36,13 @@ export interface ExposeFunctionResult {
   name: string;
   edgeNodeId?: string;
   bundleHash?: string;
+  /**
+   * Did the central registry schema match local truth after step 6?
+   * - true  → verified (description + parameters matched)
+   * - false → MISMATCH or verification call failed; registry lags local
+   * - null  → verification skipped (allowStaleRegistry was set)
+   */
+  registryVerified: boolean | null;
   error?: string;
 }
 
@@ -197,8 +215,16 @@ export async function exposeFunction(options: ExposeFunctionOptions): Promise<Ex
     console.log('✅ Schema registered centrally');
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    console.warn(`⚠️  Failed to register schema centrally: ${message}`);
-    console.warn('   The function will still work, but /params may return blank.');
+    if (options.allowStaleRegistry) {
+      console.warn(`⚠️  Failed to register schema centrally: ${message}`);
+      console.warn('   Continuing in --allow-stale-registry mode. The function works locally but /params may return blank.');
+    } else {
+      throw new Error(
+        `Failed to register schema centrally: ${message}\n` +
+        `  The function would still work locally, but /params may return blank.\n` +
+        `  If you understand the lag and want to proceed anyway, re-run with --allow-stale-registry.`
+      );
+    }
   }
 
   // 6. Tell the daemon to load this local function
@@ -234,10 +260,54 @@ export async function exposeFunction(options: ExposeFunctionOptions): Promise<Ex
     console.warn('   You can reload the function manually by restarting the daemon.');
   }
 
+  // 7. Verify central registry matches local truth (unless --allow-stale-registry)
+  let registryVerified: boolean | null = null;
+  if (!options.allowStaleRegistry) {
+    console.log('\n🔍 Verifying central registry...');
+    try {
+      const remote = await rainfall.getToolSchema(name) as
+        | { description?: string; parameters?: unknown }
+        | null
+        | undefined;
+      if (!remote) {
+        console.error(`❌ REGISTRY LAG: central registry returned no schema for "${name}"`);
+        console.error('   The function works locally but /params will return blank for this node.');
+        console.error('   Investigate central registry propagation (likely eventual-consistency delay).');
+        registryVerified = false;
+      } else {
+        const descMatches = remote.description === definition.description;
+        const paramsMatch =
+          JSON.stringify(remote.parameters ?? null) ===
+          JSON.stringify(definition.schema);
+        if (descMatches && paramsMatch) {
+          console.log('✅ Central registry matches local schema');
+          registryVerified = true;
+        } else {
+          console.error(`❌ REGISTRY LAG: central registry does not match local schema for "${name}"`);
+          console.error(`   Local description:  ${JSON.stringify(definition.description)}`);
+          console.error(`   Remote description: ${JSON.stringify(remote.description ?? '(missing)')}`);
+          console.error(`   Local parameters:   ${JSON.stringify(definition.schema).slice(0, 240)}`);
+          console.error(`   Remote parameters:  ${JSON.stringify(remote.parameters ?? '(missing)').slice(0, 240)}`);
+          console.error('   /params will return stale data. --allow-stale-registry is NOT a fix;');
+          console.error('   it only suppresses the warning. Investigate central registry propagation.');
+          registryVerified = false;
+        }
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`❌ Failed to verify central registry: ${message}`);
+      console.error('   Cannot confirm schema propagated. /params may return blank. Investigate.');
+      registryVerified = false;
+    }
+  } else {
+    registryVerified = null; // explicitly skipped via --allow-stale-registry
+  }
+
   return {
     success: true,
     name,
     edgeNodeId: result.edgeNodeId,
     bundleHash,
+    registryVerified,
   };
 }
