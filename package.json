@@ -1,28 +1,28 @@
 {
   "name": "@rainfall-devkit/sdk",
-  "version": "0.2.18",
+  "version": "0.2.22",
   "description": "Official SDK for Rainfall API - 200+ tools for building AI-powered applications",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
   "types": "./dist/index.d.ts",
   "bin": {
-    "rainfall": "./dist/cli/index.js"
+    "rainfall": "dist/cli/index.js"
   },
   "exports": {
     ".": {
+      "types": "./dist/index.d.ts",
       "import": "./dist/index.mjs",
-      "require": "./dist/index.js",
-      "types": "./dist/index.d.ts"
+      "require": "./dist/index.js"
     },
     "./mcp": {
+      "types": "./dist/mcp.d.ts",
       "import": "./dist/mcp.mjs",
-      "require": "./dist/mcp.js",
-      "types": "./dist/mcp.d.ts"
+      "require": "./dist/mcp.js"
     },
     "./daemon": {
+      "types": "./dist/daemon/index.d.ts",
       "import": "./dist/daemon/index.mjs",
-      "require": "./dist/daemon/index.js",
-      "types": "./dist/daemon/index.d.ts"
+      "require": "./dist/daemon/index.js"
     }
   },
   "files": [
